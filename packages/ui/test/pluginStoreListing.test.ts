@@ -7,6 +7,7 @@ import type {
 } from "@zcode/shared";
 import {
   buildStoreItems,
+  buildUiPluginLauncherEntries,
   canUpdatePluginItem,
   formatCanonicalPluginName,
   groupItemsByCategory,
@@ -19,6 +20,7 @@ import {
   sortMarketplaceSources,
   sortInstalledStripItems,
   sortPersonalMarketplaceGroups,
+  type StorePluginItem,
 } from "../src/settings/pluginStoreListing.js";
 
 function makeSummary(
@@ -623,5 +625,80 @@ describe("document plugin default order", () => {
       marketplace: "personal",
     }));
     expect(sortInstalledStripItems(personal, "en-US")[0]?.name).toBe("aaa");
+  });
+});
+
+function launcherItem(
+  id: string,
+  surfaces: ZCodePluginInfo["uiSurfaces"],
+  installed = true,
+): StorePluginItem {
+  return {
+    id,
+    name: id.split("@")[0] ?? id,
+    marketplace: id.split("@")[1] ?? "",
+    installed,
+    restorable: false,
+    orphaned: false,
+    info: makeInfo({ id, uiSurfaces: surfaces }),
+  };
+}
+
+describe("buildUiPluginLauncherEntries", () => {
+  const surface = (pluginId: string, id: string) => ({
+    pluginId,
+    pluginName: pluginId.split("@")[0] ?? pluginId,
+    id,
+    title: id,
+    server: `plugin:${pluginId}:app`,
+    resourceUri: `ui://${pluginId}/${id}.html`,
+    availability: "session" as const,
+  });
+
+  it("keeps recommended order and appends installed local UI plugins", () => {
+    const official = launcherItem("official@market", [surface("official@market", "panel")]);
+    const local = launcherItem("token-speed@dev", [surface("token-speed@dev", "token-speed")]);
+    const entries = buildUiPluginLauncherEntries({
+      recommendations: [{ pluginId: "official@market", surfaceId: "panel" }],
+      items: [official, local],
+    });
+
+    expect(entries.map((entry) => [entry.pluginId, entry.surfaceId])).toEqual([
+      ["official@market", "panel"],
+      ["token-speed@dev", "token-speed"],
+    ]);
+  });
+
+  it("deduplicates a recommended local plugin by pluginId and surfaceId", () => {
+    const local = launcherItem("token-speed@dev", [
+      surface("token-speed@dev", "token-speed"),
+      surface("token-speed@dev", "secondary"),
+    ]);
+    const entries = buildUiPluginLauncherEntries({
+      recommendations: [{ pluginId: "token-speed@dev", surfaceId: "token-speed" }],
+      items: [local],
+    });
+
+    expect(entries.map((entry) => entry.surfaceId)).toEqual(["token-speed", "secondary"]);
+  });
+
+  it("includes disabled installed plugins so the launcher can enable them", () => {
+    const disabled = launcherItem("token-speed@dev", [surface("token-speed@dev", "token-speed")]);
+    disabled.info = { ...disabled.info!, enabled: false };
+    const entries = buildUiPluginLauncherEntries({ recommendations: [], items: [disabled] });
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.item.info?.enabled).toBe(false);
+  });
+
+  it("ignores uninstalled items and installed plugins without surfaces", () => {
+    const uninstalled = launcherItem("pending@market", [surface("pending@market", "panel")], false);
+    const noSurface = launcherItem("plain@market", undefined);
+    const entries = buildUiPluginLauncherEntries({
+      recommendations: [{ pluginId: "missing@market", surfaceId: "panel" }],
+      items: [uninstalled, noSurface],
+    });
+
+    expect(entries).toEqual([]);
   });
 });

@@ -189,6 +189,45 @@ export function isUiPluginItem(item: StorePluginItem): boolean {
   );
 }
 
+export interface UiPluginLauncherEntry {
+  pluginId: string;
+  surfaceId: string;
+  item: StorePluginItem;
+}
+
+/**
+ * 侧栏「应用插件」入口：官方推荐列表 + 本地已安装 UI 插件。
+ *
+ * 推荐列表来自客户端配置，只覆盖官方挑选的插件；本地插件没有远程推荐位，
+ * 但仍需要出现在新标签页里，否则只能绕到插件市场手动打开。按 pluginId/surfaceId 去重，
+ * 推荐项保持原顺序，本地项追加在后，禁用插件也保留（入口会先执行启用）。
+ */
+export function buildUiPluginLauncherEntries(input: {
+  recommendations: readonly { pluginId: string; surfaceId: string }[];
+  items: readonly StorePluginItem[];
+}): UiPluginLauncherEntry[] {
+  const seen = new Set<string>();
+  const entries: UiPluginLauncherEntry[] = [];
+  const add = (pluginId: string, surfaceId: string, item: StorePluginItem): void => {
+    const key = `${pluginId}\u0000${surfaceId}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    entries.push({ pluginId, surfaceId, item });
+  };
+
+  for (const recommendation of input.recommendations) {
+    const item = input.items.find((candidate) => candidate.id === recommendation.pluginId);
+    if (item) add(recommendation.pluginId, recommendation.surfaceId, item);
+  }
+  for (const item of input.items) {
+    if (!item.installed) continue;
+    for (const surface of item.info?.uiSurfaces ?? []) {
+      add(item.id, surface.id, item);
+    }
+  }
+  return entries;
+}
+
 /** 个人分段的市场分组：marketplace 是排序键，title 是展示名。 */
 export interface PersonalMarketplaceGroup {
   marketplace: string;

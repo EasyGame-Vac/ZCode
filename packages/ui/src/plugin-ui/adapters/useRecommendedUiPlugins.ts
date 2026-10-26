@@ -4,6 +4,7 @@ import { useServices } from "@/hooks/useServices.js";
 import { useScopedPluginManagementStore } from "@/store/pluginManagementStore.js";
 import {
   buildStoreItems,
+  buildUiPluginLauncherEntries,
   isItemBusy,
   type StorePluginItem,
 } from "@/settings/pluginStoreListing.js";
@@ -65,18 +66,7 @@ export function useRecommendedUiPlugins(target: {
     };
   }, [context, service, store, target.workspaceIdentity, target.workspacePath, target.sessionId]);
   const items = ready === context ? buildStoreItems(state) : [];
-  const entries = recommendations.flatMap((entry, index) => {
-    const item = items.find((candidate) => candidate.id === entry.pluginId);
-    if (
-      !item ||
-      recommendations.findIndex(
-        (candidate) =>
-          candidate.pluginId === entry.pluginId && candidate.surfaceId === entry.surfaceId,
-      ) !== index
-    )
-      return [];
-    return [{ ...entry, item }];
-  });
+  const entries = buildUiPluginLauncherEntries({ recommendations, items });
   const isCurrent = () => current.current === context;
   const prepare = async (item: StorePluginItem) => {
     // 读取 store 的即时状态，同插件重复点击被拦截，其他插件不受影响。
