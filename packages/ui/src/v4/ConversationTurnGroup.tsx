@@ -71,6 +71,10 @@ import {
 import { useAssistantPreviewCardsForAssistantTextRow } from "@/v4/useAssistantPreviewCardsForRow.js";
 import { shouldShowTurnChatLoading } from "@/v4/chatLoadingVisibility.js";
 import {
+  resolveConversationLiveOutputSpeed,
+  type ConversationLiveOutputSpeed,
+} from "@/v4/conversationTurnWorkSegments.js";
+import {
   buildAssistantWorkRenderItems,
   ENABLE_CHANGES_TOOL_CALL_GROUPING,
   ENABLE_CUA_TOOL_CALL_GROUPING,
@@ -208,12 +212,34 @@ function toRetryStatus(apiRetry: ApiRetryState): ZCodeApiRetryStatus {
   };
 }
 
+export function LiveOutputSpeedBadge({ speed }: { speed: ConversationLiveOutputSpeed | null }) {
+  const { intl, locale } = useZCodeIntl();
+  if (speed === null) return null;
+
+  const tps = new Intl.NumberFormat(locale, {
+    // 慢模型可能低于 1 tok/s；一位小数会把它们四舍五入成 0。
+    maximumFractionDigits: speed.tokensPerSecond < 1 ? 2 : 1,
+  }).format(speed.tokensPerSecond);
+
+  return (
+    <span
+      data-zcode-live-output-speed="true"
+      className="select-none text-ui-sm leading-5 text-foreground-subtle tabular-nums"
+      title={intl.formatMessage({ id: "chat.history.outputTokensPerSecondDescription" })}
+    >
+      {intl.formatMessage({ id: "chat.history.outputTokensPerSecond" }, { tps })}
+    </span>
+  );
+}
+
 function TurnChatLoadingSlot({
   apiRetry,
   eligible,
+  liveOutputSpeed,
 }: {
   apiRetry: ApiRetryState | null;
   eligible: boolean;
+  liveOutputSpeed: ConversationLiveOutputSpeed | null;
 }) {
   const { intl, locale } = useZCodeIntl();
   const retryStatus = useMemo(() => (apiRetry ? toRetryStatus(apiRetry) : null), [apiRetry]);
@@ -224,13 +250,16 @@ function TurnChatLoadingSlot({
     retryStatus && retryStatus.attempt >= MIN_VISIBLE_API_RETRY_ATTEMPT ? retryStatus : null;
   if (!visibleRetryStatus && !eligible) return null;
   return (
-    <div data-zcode-chat-loading-slot="true" className="min-h-5">
+    <div data-zcode-chat-loading-slot="true" className="flex min-h-5 items-center gap-2">
       {visibleRetryStatus ? (
         <ChatApiRetryStatus apiRetry={visibleRetryStatus} intl={intl} locale={locale} />
       ) : (
-        // running 是 ChatLoading 的权威事实；额外静默计时会让 projection
-        // 更新反复重启可见性，并使 UI 晚于真实状态。
-        <ChatLoading loading data-testid={TID_CHAT_LOADING} size="sm" />
+        <>
+          {/* running 是 ChatLoading 的权威事实；额外静默计时会让 projection
+              更新反复重启可见性，并使 UI 晚于真实状态。 */}
+          <ChatLoading loading data-testid={TID_CHAT_LOADING} size="sm" />
+          <LiveOutputSpeedBadge speed={liveOutputSpeed} />
+        </>
       )}
     </div>
   );
@@ -888,6 +917,7 @@ function ConversationWorkSegmentFlow({
 
 function ConversationTurnFlow({
   unit,
+  nowMs,
   apiRetry,
   context,
   onFork,
@@ -902,6 +932,7 @@ function ConversationTurnFlow({
   highspeedMeta,
 }: {
   unit: ConversationTurnRenderUnit;
+  nowMs: number;
   apiRetry: ApiRetryState | null;
   context: ConversationRowRenderContext;
   onFork?: (target: ConversationRowTarget) => void;
@@ -924,6 +955,10 @@ function ConversationTurnFlow({
     isRunning: unit.isRunning,
     rows: unit.assistantWorkRows,
   });
+  // 纯 UI 派生值：只在运行中的流式正文/思考行上估算，不写回 projection。
+  const liveOutputSpeed = unit.isRunning
+    ? resolveConversationLiveOutputSpeed(unit.assistantWorkRows, nowMs)
+    : null;
   const assistantPreviewCards = useAssistantPreviewCardsForAssistantTextRow({
     row: unit.latestAssistantTextRow,
     assistantTextRows: unit.assistantTextRows,
@@ -947,7 +982,11 @@ function ConversationTurnFlow({
           stageTailIsRunning={unit.isRunning}
           assistantCodeCommentProjectionEnabled={assistantCodeCommentProjectionEnabled}
         />
-        <TurnChatLoadingSlot apiRetry={apiRetry} eligible={showLoading} />
+        <TurnChatLoadingSlot
+          apiRetry={apiRetry}
+          eligible={showLoading}
+          liveOutputSpeed={liveOutputSpeed}
+        />
       </div>
     );
   }
@@ -1022,7 +1061,11 @@ function ConversationTurnFlow({
           highspeedMeta={highspeedMeta}
         />
       ))}
-      <TurnChatLoadingSlot apiRetry={apiRetry} eligible={showLoading} />
+      <TurnChatLoadingSlot
+        apiRetry={apiRetry}
+        eligible={showLoading}
+        liveOutputSpeed={liveOutputSpeed}
+      />
     </div>
   );
 }
@@ -1072,6 +1115,7 @@ function resolveWorkflowNotification(
 
 function ConversationBackgroundResultWork({
   unit,
+  nowMs,
   apiRetry,
   context,
   onFork,
@@ -1083,6 +1127,7 @@ function ConversationBackgroundResultWork({
   assistantPreviewCardsAutoOpenKey,
 }: {
   unit: ConversationTurnRenderUnit;
+  nowMs: number;
   apiRetry: ApiRetryState | null;
   context: ConversationRowRenderContext;
   onFork?: (target: ConversationRowTarget) => void;
@@ -1102,6 +1147,9 @@ function ConversationBackgroundResultWork({
     isRunning: unit.isRunning,
     rows: unit.assistantWorkRows,
   });
+  const liveOutputSpeed = unit.isRunning
+    ? resolveConversationLiveOutputSpeed(unit.assistantWorkRows, nowMs)
+    : null;
   const latestAssistantTextRow = unit.latestAssistantTextRow;
   const assistantPreviewCards = useAssistantPreviewCardsForAssistantTextRow({
     row: latestAssistantTextRow,
@@ -1229,7 +1277,11 @@ function ConversationBackgroundResultWork({
           assistantCodeCommentProjectionEnabled={assistantCodeCommentProjectionEnabled}
         />
       ) : null}
-      <TurnChatLoadingSlot apiRetry={apiRetry} eligible={showLoading} />
+      <TurnChatLoadingSlot
+        apiRetry={apiRetry}
+        eligible={showLoading}
+        liveOutputSpeed={liveOutputSpeed}
+      />
     </div>
   );
 }
@@ -1498,6 +1550,7 @@ function ConversationTurnGroupImpl({
               ))}
               <ConversationBackgroundResultWork
                 unit={unit}
+                nowMs={nowMs}
                 apiRetry={apiRetry}
                 context={assistantRowContext}
                 onFork={canForkLatestAssistant ? onFork : undefined}
@@ -1516,6 +1569,7 @@ function ConversationTurnGroupImpl({
           ) : (
             <ConversationTurnFlow
               unit={unit}
+              nowMs={nowMs}
               apiRetry={apiRetry}
               context={assistantRowContext}
               onFork={canForkLatestAssistant ? onFork : undefined}
@@ -1642,6 +1696,7 @@ function ConversationTurnGroupImpl({
       ) : (
         <ConversationTurnFlow
           unit={unit}
+          nowMs={nowMs}
           apiRetry={apiRetry}
           context={assistantRowContext}
           onEdit={onEdit}

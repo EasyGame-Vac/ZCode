@@ -2285,6 +2285,27 @@ describe("ConversationTurnGroup assistant history status", () => {
 });
 
 describe("ConversationTurnGroup ChatLoading lifecycle", () => {
+  it("展示流式正文的估算 token 速度，并在 1 秒观察窗口前隐藏", () => {
+    const streaming = assistantTextRow(1, {
+      state: "streaming",
+      text: "a".repeat(120),
+      createdAt: 1_000,
+    });
+    const unit = baseUnit({
+      isRunning: true,
+      assistantWorkRows: [streaming],
+      assistantTextRows: [streaming],
+      assistantHistoryDefaultOpen: true,
+    });
+
+    const visibleHtml = renderUnit(unit, { nowMs: 5_000 });
+    expect(visibleHtml).toContain('data-zcode-live-output-speed="true"');
+    expect(visibleHtml).toContain("约 10 tok/s");
+
+    const earlyHtml = renderUnit(unit, { nowMs: 1_999 });
+    expect(earlyHtml).not.toContain('data-zcode-live-output-speed="true"');
+  });
+
   it("第三次 retry 才替换当前 turn 底部的通用 loading，并保留 3/10 计数口径", () => {
     const html = renderUnit(
       baseUnit({

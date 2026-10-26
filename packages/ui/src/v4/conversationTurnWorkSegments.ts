@@ -4,6 +4,7 @@ import type {
   TurnHeaderRow,
   UserInputRow,
 } from "@zcode/shared/zcode-protocol-v4";
+import { ESTIMATED_TOKEN_CHAR_DIVISOR } from "@zcode/shared";
 import {
   ENABLE_CUA_TOOL_CALL_GROUPING,
   prepareCuaGroupFlowItems,
@@ -235,4 +236,68 @@ export function buildConversationTurnWorkSegments(options: {
       ...(segmentWorkStatus ? { workStatus: segmentWorkStatus } : {}),
     };
   });
+}
+
+/** 首段流式输出不足 1 秒时，样本太小，瞬时值没有参考意义。 */
+export const MIN_LIVE_OUTPUT_SPEED_ELAPSED_MS = 1_000;
+
+export interface ConversationLiveOutputSpeed {
+  estimatedTokens: number;
+  elapsedMs: number;
+  tokensPerSecond: number;
+}
+
+/**
+ * 与 CLI 的 estimateTokens 保持同一口径。
+ * 这里只服务运行中的临时展示，provider usage 才是请求结束后的权威值。
+ */
+export function estimateStreamedOutputTokens(text: string): number {
+  if (text.length === 0) return 0;
+  const chineseChars = (text.match(/[\u4e00-\u9fff]/g) ?? []).length;
+  const otherChars = text.length - chineseChars;
+  return Math.ceil((chineseChars * 2 + otherChars) / ESTIMATED_TOKEN_CHAR_DIVISOR);
+}
+
+/**
+ * 从当前 turn 的流式正文/思考行估算输出速度。
+ *
+ * 纯派生值：不写入 projection/store，也不代表 provider 的最终 usage。
+ * 工具调用参数生成和等待工具执行期间没有流式正文行，因此自然不展示。
+ */
+export function resolveConversationLiveOutputSpeed(
+  rows: readonly AssistantWorkRow[],
+  nowMs: number,
+  options: { minimumElapsedMs?: number } = {},
+): ConversationLiveOutputSpeed | null {
+  let earliestStartedAt: number | undefined;
+  let estimatedTokens = 0;
+
+  for (const row of rows) {
+    const streamingText =
+      row.kind === "assistantText" && row.state === "streaming"
+        ? row.text
+        : row.kind === "reasoning" && row.state === "streaming"
+          ? row.text
+          : undefined;
+    if (streamingText === undefined || streamingText.length === 0) continue;
+
+    estimatedTokens += estimateStreamedOutputTokens(streamingText);
+    earliestStartedAt =
+      earliestStartedAt === undefined ? row.createdAt : Math.min(earliestStartedAt, row.createdAt);
+  }
+
+  if (estimatedTokens <= 0 || earliestStartedAt === undefined) return null;
+
+  const elapsedMs = nowMs - earliestStartedAt;
+  if (
+    !Number.isFinite(elapsedMs) ||
+    elapsedMs < (options.minimumElapsedMs ?? MIN_LIVE_OUTPUT_SPEED_ELAPSED_MS)
+  ) {
+    return null;
+  }
+
+  const tokensPerSecond = (estimatedTokens * 1_000) / elapsedMs;
+  if (!Number.isFinite(tokensPerSecond) || tokensPerSecond <= 0) return null;
+
+  return { estimatedTokens, elapsedMs, tokensPerSecond };
 }

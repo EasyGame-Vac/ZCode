@@ -15,6 +15,7 @@ interface ChatLoadingLayoutSample {
   hasLiveTail: boolean;
   historyOpen: boolean | null;
   liveHeight: number | null;
+  liveOutputSpeed: string | null;
   loadingTop: number | null;
   loadingVisible: boolean;
   scrollHeight: number;
@@ -105,6 +106,14 @@ describe("CHL05/CHL07/CHL08/P08 ChatLoading、终态与手动折叠滚动权", (
       throw new Error(
         `CHL05/CHL07 跟随态采样未通过: ${JSON.stringify({ followingReport, followingTerminal })}`,
       );
+    }
+    // 实时 token 速度只在流式正文持续 1 秒后出现；长正文用例必须能观察到至少一次。
+    if (
+      !followingProbeResult.samples.some((sample) =>
+        sample.liveOutputSpeed?.includes("tok/s"),
+      )
+    ) {
+      throw new Error("CHL05 跟随态未观察到实时 token 速度");
     }
     await assertAssistantHistoryToggleStability("following");
 
@@ -614,6 +623,10 @@ async function installChatLoadingLayoutProbe() {
               ? false
               : null,
         liveHeight: liveRect?.height ?? null,
+        liveOutputSpeed:
+          document
+            .querySelector<HTMLElement>('[data-zcode-live-output-speed="true"]')
+            ?.textContent?.trim() ?? null,
         loadingTop: loadingRect?.top ?? null,
         loadingVisible: Boolean(
           loading &&

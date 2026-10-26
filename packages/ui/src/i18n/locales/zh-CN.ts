@@ -5321,6 +5321,9 @@ const zhCN: Record<string, string> = {
   "chat.message.retry": "重试",
   "chat.history.workingFor": "工作中 {duration}",
   "chat.history.workedFor": "已工作 {duration}",
+  "chat.history.outputTokensPerSecond": "约 {tps} tok/s",
+  "chat.history.outputTokensPerSecondDescription":
+    "根据流式正文估算；最终用量以请求结束后的服务端统计为准。",
   "chat.history.worked": "已处理",
   "chat.topicPreparation.preparing": "正在准备材料",
   "chat.topicPreparation.waitingStop": "等待当前执行停止",

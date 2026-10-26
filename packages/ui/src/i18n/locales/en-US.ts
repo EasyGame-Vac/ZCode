@@ -5694,6 +5694,9 @@ const enUS: Record<string, string> = {
   "chat.message.retry": "Retry",
   "chat.history.workingFor": "Working for {duration}",
   "chat.history.workedFor": "Worked for {duration}",
+  "chat.history.outputTokensPerSecond": "~{tps} tok/s",
+  "chat.history.outputTokensPerSecondDescription":
+    "Estimated from streamed text; final usage is reported by the provider when the request completes.",
   "chat.history.worked": "Worked",
   "chat.topicPreparation.preparing": "Preparing materials",
   "chat.topicPreparation.waitingStop": "Waiting for the current run to stop",
