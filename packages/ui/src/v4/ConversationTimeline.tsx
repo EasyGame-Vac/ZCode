@@ -301,6 +301,10 @@ export interface ConversationTimelineProps {
   onLoadOlder?: () => Promise<void> | void;
   /** 宽屏问题目录挂载后一次补齐当前有效分支的全部历史。 */
   onLoadAllOlder?: () => Promise<ConversationTurnNavigatorHydrationResult>;
+  /** 主视图启用 live 保留时禁止宽屏自动补齐全部历史；历史走按需入口。 */
+  disableTurnNavigatorAutoHydration?: boolean;
+  /** 视口是否跟随底部；live 保留只在跟随时裁头，避免向上阅读时滚动跳变。 */
+  onFollowingChange?: (following: boolean) => void;
   /**
    * 问题导航目录失效代际（store turnNavigatorDirectoryRevision）。
    * real-user query 增删后终态必须失效重探测；组件 hydration key
@@ -393,6 +397,8 @@ function ConversationTimelineImpl({
   loadingOlder = false,
   onLoadOlder,
   onLoadAllOlder,
+  disableTurnNavigatorAutoHydration = false,
+  onFollowingChange,
   turnNavigatorDirectoryRevision = 0,
   bottomDock,
   selectionPanelLayoutContainerRef,
@@ -555,6 +561,9 @@ function ConversationTimelineImpl({
   const loadOlderRef = useRef({ canLoadOlder, loadingOlder, onLoadOlder });
   loadOlderRef.current = { canLoadOlder, loadingOlder, onLoadOlder };
   const followingRef = useRef(initialFollowing());
+  // 回调经 ref 读取：宿主可能传内联函数，不能让它进入 commitFollowing 的依赖。
+  const onFollowingChangeRef = useRef(onFollowingChange);
+  onFollowingChangeRef.current = onFollowingChange;
   const programmaticScrollFrameRef = useRef<number | null>(null);
   const userScrollIntentRef = useRef<{
     intent: TimelineUserScrollIntent;
@@ -729,6 +738,7 @@ function ConversationTimelineImpl({
   }, []);
 
   useEffect(() => {
+    if (disableTurnNavigatorAutoHydration) return;
     if (
       !shouldHydrateConversationTurnNavigatorDirectory({
         canLoadOlder,
@@ -789,6 +799,7 @@ function ConversationTimelineImpl({
     });
   }, [
     canLoadOlder,
+    disableTurnNavigatorAutoHydration,
     loadingOlder,
     onLoadAllOlder,
     rowContext.logEpoch,
@@ -898,6 +909,13 @@ function ConversationTimelineImpl({
     if (followingRef.current === following) return;
     followingRef.current = following;
     setBackToBottomVisible(shouldShowBackToBottom(following, unitsRef.current.length));
+    onFollowingChangeRef.current?.(following);
+  }, []);
+
+  // 初始 following 不会经过 commitFollowing（ref 初始化不触发回调），挂载时同步一次，
+  // 让 projection store 的 live 保留策略知道当前视口是否贴在底部。
+  useEffect(() => {
+    onFollowingChangeRef.current?.(followingRef.current);
   }, []);
 
   const clearUserScrollIntent = useCallback(() => {

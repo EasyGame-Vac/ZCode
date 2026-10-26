@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { AssistantWorkRow } from "@/v4/conversationTurnFlowItems.js";
 import {
+  derivePerformanceHudMetrics,
   estimateStreamedOutputTokens,
   resolveConversationLiveOutputSpeed,
   type ConversationLiveOutputSpeed,
@@ -129,5 +130,111 @@ describe("LiveOutputSpeedBadge", () => {
 
   it("renders nothing without a speed", () => {
     expect(renderBadge(null)).toBe("");
+  });
+});
+
+describe("derivePerformanceHudMetrics", () => {
+  const usage = {
+    contextWindow: {
+      usedTokens: 50_000,
+      maxTokens: 100_000,
+      autoCompactThresholdTokens: null,
+    },
+    cumulative: {
+      inputTokens: 10_000,
+      outputTokens: 2_000,
+      cacheReadTokens: 9_000,
+      cacheWriteTokens: 0,
+    },
+  };
+  const config = { provider: "new-provider-2", model: "deepseek-v4.1-flash" };
+
+  function input(rows: AssistantWorkRow[]) {
+    return {
+      rows: [
+        ...rows,
+        {
+          rowId: 99,
+          turnId: "turn-1",
+          createdAt: 900,
+          createdAtSeq: 99,
+          kind: "turnHeader",
+          origin: "userInput",
+          state: "completedSuccess",
+          startedAt: 900,
+          outputTokens: 212,
+        },
+      ],
+      usage,
+      config,
+    } as unknown as Parameters<typeof derivePerformanceHudMetrics>[0];
+  }
+
+  it("derives live speed, context and cache metrics while streaming", () => {
+    const metrics = derivePerformanceHudMetrics(
+      input([streamingTextRow("a".repeat(120), 1_000)]),
+      5_000,
+    );
+
+    expect(metrics).toMatchObject({
+      liveTokensPerSecond: 10,
+      estimatedTokens: 40,
+      streaming: true,
+      contextUsedTokens: 50_000,
+      contextMaxTokens: 100_000,
+      contextRatio: 0.5,
+      cacheHitRate: 0.9,
+      lastTurnOutputTokens: 212,
+      provider: "new-provider-2",
+      model: "deepseek-v4.1-flash",
+    });
+  });
+
+  it("does not invent a live speed when idle", () => {
+    const metrics = derivePerformanceHudMetrics(input([]), 5_000);
+
+    expect(metrics.liveTokensPerSecond).toBeNull();
+    expect(metrics.streaming).toBe(false);
+    expect(metrics.lastTurnOutputTokens).toBe(212);
+  });
+
+  it("computes a weighted TPS for the selected window", () => {
+    const now = 10_000_000;
+    const header = (
+      rowId: number,
+      at: number,
+      outputTokens: number,
+      modelOutputDurationMs: number,
+    ) =>
+      ({
+        rowId,
+        turnId: `turn-${rowId}`,
+        createdAt: at,
+        createdAtSeq: rowId,
+        kind: "turnHeader",
+        origin: "userInput",
+        state: "completedSuccess",
+        startedAt: at,
+        endedAt: at + modelOutputDurationMs,
+        outputTokens,
+        modelOutputDurationMs,
+      }) as unknown as Parameters<typeof derivePerformanceHudMetrics>[0]["rows"][number];
+    const rows = [
+      header(1, now - 2 * 60 * 60 * 1000, 2_000, 40_000),
+      header(2, now - 5 * 60 * 1000, 1_000, 10_000),
+    ];
+    const windowInput = { rows, usage, config } as unknown as Parameters<
+      typeof derivePerformanceHudMetrics
+    >[0];
+
+    const lastHour = derivePerformanceHudMetrics(windowInput, now, "1h");
+    expect(lastHour.windowTokensPerSecond).toBe(100);
+    expect(lastHour.windowOutputTokens).toBe(1_000);
+    expect(lastHour.windowTurnCount).toBe(1);
+
+    const session = derivePerformanceHudMetrics(windowInput, now, "session");
+    expect(session.windowTokensPerSecond).toBe(60);
+    expect(session.windowOutputTokens).toBe(3_000);
+    expect(session.windowTurnCount).toBe(2);
   });
 });

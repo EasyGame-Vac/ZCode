@@ -4239,6 +4239,7 @@ export function createZCodeAgentService(
         {
           sessionId: params.sessionId,
           afterMessageId: params.afterMessageId,
+          beforeMessageId: params.beforeMessageId,
           limit: params.limit,
         },
         zcodeSessionMessagesResultSchema,

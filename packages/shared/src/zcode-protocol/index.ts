@@ -2031,6 +2031,8 @@ export const zcodeSessionMessagesParamsSchema = z
   .object({
     sessionId: nonEmptyString,
     afterMessageId: nonEmptyString.optional(),
+    // 历史抽屉：取 beforeMessageId 之前的一页，不把整段历史并入 live projection。
+    beforeMessageId: nonEmptyString.optional(),
     limit: z.number().int().positive().optional(),
   })
   .strict();

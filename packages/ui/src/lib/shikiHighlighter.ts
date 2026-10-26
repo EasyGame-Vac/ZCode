@@ -59,8 +59,9 @@ const highlighterCache = new Map<
 >();
 const tokensCache = new Map<string, TokenizedCode>();
 const subscribers = new Map<string, Set<(result: TokenizedCode) => void>>();
-// 内存诊断计数器：tokensCache 目前无淘汰，是审计里
-// renderer 最可疑的增长点，先把条数落到日志里。
+// token cache 必须有界：流式内联 diff 的每个中间版本都会产生新 key。
+// 超长会话里无界增长是 renderer 最可疑的内存增长点之一。
+const SHIKI_TOKEN_CACHE_MAX_ENTRIES = 500;
 uiMemoryDiagnosticsRegistry.register("shiki", () => ({
   tokensCache: tokensCache.size,
   highlighters: highlighterCache.size,
@@ -78,15 +79,22 @@ const getResolvedCodeTheme = (theme?: BundledTheme): BundledTheme => {
   return "github-light";
 };
 
+// 只取首尾 100 字符会让中间不同、长度相同的代码撞 key 并返回错误 tokens。
+// 用完整内容的 FNV-1a 哈希作为身份；O(L) 与高亮本身同阶。
+function hashCodeForCache(code: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < code.length; index += 1) {
+    hash ^= code.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
 const getCodeTokensCacheKey = (
   code: string,
   language: BundledLanguage,
   theme: BundledTheme,
-) => {
-  const start = code.slice(0, 100);
-  const end = code.length > 100 ? code.slice(-100) : "";
-  return `${theme}:${language}:${code.length}:${start}:${end}`;
-};
+) => `${theme}:${language}:${code.length}:${hashCodeForCache(code)}`;
 const getHighlighter = (
   language: BundledLanguage,
   theme: BundledTheme,
@@ -177,6 +185,10 @@ export const highlightCode = (
         tokens: result.tokens,
       };
 
+      if (tokensCache.size >= SHIKI_TOKEN_CACHE_MAX_ENTRIES) {
+        const oldest = tokensCache.keys().next();
+        if (!oldest.done) tokensCache.delete(oldest.value);
+      }
       tokensCache.set(tokensCacheKey, tokenized);
 
       const subs = subscribers.get(tokensCacheKey);

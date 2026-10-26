@@ -9,6 +9,8 @@ const CLOSED_STATE: ConversationStoreState = {
   lastError: null,
   optimisticCommands: [],
   loadingOlder: false,
+  hiddenTurnCount: 0,
+  workflowRowsRevision: 0,
   sessionPlans: [],
   planDirectoryRevision: 0,
   plansLoading: false,

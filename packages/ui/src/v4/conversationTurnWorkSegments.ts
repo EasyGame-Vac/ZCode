@@ -1,6 +1,7 @@
 import type {
   AssistantTextRow,
   ConversationRow,
+  ConversationSnapshot,
   TurnHeaderRow,
   UserInputRow,
 } from "@zcode/shared/zcode-protocol-v4";
@@ -23,6 +24,20 @@ export interface ConversationTurnWorkStatus {
   state: "running" | "completed" | "interrupted";
   durationMs?: number;
 }
+
+/** SessionPane 内置 Performance HUD 的开关事件；detail.sessionId 用于只切换当前 pane。 */
+export const PERFORMANCE_HUD_TOGGLE_EVENT = "zcode:performance-hud:toggle";
+
+export const PERFORMANCE_HUD_WINDOWS = ["1m", "5m", "15m", "30m", "1h", "3h", "session"] as const;
+export type PerformanceHudWindow = (typeof PERFORMANCE_HUD_WINDOWS)[number];
+const PERFORMANCE_HUD_WINDOW_MS: Record<Exclude<PerformanceHudWindow, "session">, number> = {
+  "1m": 60 * 1000,
+  "5m": 5 * 60 * 1000,
+  "15m": 15 * 60 * 1000,
+  "30m": 30 * 60 * 1000,
+  "1h": 60 * 60 * 1000,
+  "3h": 3 * 60 * 60 * 1000,
+};
 
 export interface ConversationTurnWorkSegment {
   key: string;
@@ -300,4 +315,131 @@ export function resolveConversationLiveOutputSpeed(
   if (!Number.isFinite(tokensPerSecond) || tokensPerSecond <= 0) return null;
 
   return { estimatedTokens, elapsedMs, tokensPerSecond };
+}
+
+export interface PerformanceHudMetrics {
+  liveTokensPerSecond: number | null;
+  estimatedTokens: number;
+  streaming: boolean;
+  contextUsedTokens: number | null;
+  contextMaxTokens: number | null;
+  contextRatio: number | null;
+  cacheHitRate: number | null;
+  lastTurnOutputTokens: number | null;
+  lastCompletedTokensPerSecond: number | null;
+  medianCompletedTokensPerSecond: number | null;
+  p90CompletedTokensPerSecond: number | null;
+  completedSampleCount: number;
+  windowTokensPerSecond: number | null;
+  windowOutputTokens: number;
+  windowDurationMs: number;
+  windowTurnCount: number;
+  provider: string;
+  model: string;
+}
+
+function percentileOf(values: readonly number[], percentile: number): number | null {
+  if (values.length === 0) return null;
+  const position = ((values.length - 1) * percentile) / 100;
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  const lowerValue = values[lower];
+  const upperValue = values[upper];
+  if (lowerValue === undefined || upperValue === undefined) return null;
+  if (lower === upper) return lowerValue;
+  return lowerValue + (upperValue - lowerValue) * (position - lower);
+}
+
+/**
+ * 自用浮层的派生指标。生成中读 streaming rows 估算速度；空闲时只展示最近一轮的
+ * 精确 outputTokens、上下文水位和累计缓存命中，不伪造一个“空闲 TPS”。
+ */
+export function derivePerformanceHudMetrics(
+  input: {
+    rows: readonly ConversationRow[];
+    usage: ConversationSnapshot["usage"];
+    config: ConversationSnapshot["config"];
+  },
+  nowMs: number,
+  window: PerformanceHudWindow = "5m",
+): PerformanceHudMetrics {
+  const workRows = input.rows.filter(
+    (row) => row.kind !== "turnHeader" && row.kind !== "userInput",
+  ) as AssistantWorkRow[];
+  const live = resolveConversationLiveOutputSpeed(workRows, nowMs);
+  const streaming = workRows.some(
+    (row) =>
+      (row.kind === "assistantText" || row.kind === "reasoning") && row.state === "streaming",
+  );
+
+  let lastTurnOutputTokens: number | null = null;
+  const completedRates: number[] = [];
+  let lastCompletedTokensPerSecond: number | null = null;
+  for (let index = input.rows.length - 1; index >= 0; index -= 1) {
+    const row = input.rows[index];
+    if (row?.kind !== "turnHeader") continue;
+    if (
+      typeof row.outputTokensPerSecond === "number" &&
+      Number.isFinite(row.outputTokensPerSecond) &&
+      row.outputTokensPerSecond > 0
+    ) {
+      completedRates.push(row.outputTokensPerSecond);
+      lastCompletedTokensPerSecond ??= row.outputTokensPerSecond;
+    }
+    if (lastTurnOutputTokens === null && row.outputTokens !== undefined) {
+      lastTurnOutputTokens = row.outputTokens;
+    }
+  }
+  const recentRates = completedRates.slice(0, 30).reverse();
+  const sortedRates = [...recentRates].sort((left, right) => left - right);
+
+  const contextWindow = input.usage.contextWindow;
+  const contextUsedTokens = contextWindow?.usedTokens ?? null;
+  const contextMaxTokens = contextWindow?.maxTokens ?? null;
+  const contextRatio =
+    contextUsedTokens !== null && contextMaxTokens !== null && contextMaxTokens > 0
+      ? Math.min(1, contextUsedTokens / contextMaxTokens)
+      : null;
+  const cumulative = input.usage.cumulative;
+  const cacheHitRate =
+    cumulative.inputTokens > 0 ? cumulative.cacheReadTokens / cumulative.inputTokens : null;
+
+  const windowCutoff = window === "session" ? null : nowMs - PERFORMANCE_HUD_WINDOW_MS[window];
+  let windowOutputTokens = 0;
+  let windowDurationMs = 0;
+  let windowTurnCount = 0;
+  for (const row of input.rows) {
+    if (row.kind !== "turnHeader") continue;
+    const at = row.endedAt ?? row.startedAt ?? row.createdAt;
+    if (windowCutoff !== null && at < windowCutoff) continue;
+    const outputTokens = row.outputTokens ?? 0;
+    const outputDurationMs = row.modelOutputDurationMs ?? 0;
+    if (outputTokens <= 0 || outputDurationMs <= 0) continue;
+    windowOutputTokens += outputTokens;
+    windowDurationMs += outputDurationMs;
+    windowTurnCount += 1;
+  }
+  const windowTokensPerSecond =
+    windowDurationMs > 0 ? (windowOutputTokens * 1000) / windowDurationMs : null;
+
+  return {
+    liveTokensPerSecond: live?.tokensPerSecond ?? null,
+    estimatedTokens: live?.estimatedTokens ?? 0,
+    streaming,
+    contextUsedTokens,
+    contextMaxTokens,
+    contextRatio,
+    cacheHitRate,
+    lastTurnOutputTokens,
+    lastCompletedTokensPerSecond,
+    medianCompletedTokensPerSecond: percentileOf(sortedRates, 50),
+    p90CompletedTokensPerSecond: percentileOf(sortedRates, 90),
+    completedSampleCount: recentRates.length,
+    windowTokensPerSecond,
+    windowOutputTokens,
+    windowDurationMs,
+    windowTurnCount,
+    provider: input.config.provider,
+    model: input.config.model,
+  };
 }

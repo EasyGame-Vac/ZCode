@@ -24,6 +24,10 @@ import { logger } from "@/logger.js";
 import type { ConversationTurnNavigatorHydrationResult } from "@/v4/conversationTurnNavigatorHelpers.js";
 import type { ConversationTransport } from "@/v4/transport.js";
 import { ConversationRowPool } from "@/v4/conversationRowSharing.js";
+import {
+  rewindsIntoUnloadedHead,
+  trimRowsToRecentTurns,
+} from "@/v4/conversationLiveRetention.js";
 import { uiMemoryDiagnosticsRegistry } from "@/lib/memoryDiagnostics.js";
 
 /**
@@ -122,6 +126,14 @@ export interface ConversationStoreState {
   optimisticCommands: readonly OptimisticCommand[];
   /** loadOlder 在途标记（自动预取防重入）。 */
   loadingOlder: boolean;
+  /** 主视图已裁掉的完整产品轮数；用于“更早的 N 轮”提示。 */
+  hiddenTurnCount: number;
+  /**
+   * workflow 相关行投影的失效代际。只有 toolCall 行增删/输入流式、rewind、窗口裁剪
+   * 或 snapshot 替换时递增；普通文本 delta 不递增，使宿主侧的 workflow 联查表保持引用稳定，
+   * 从而恢复 ConversationRowView 的 memo。
+   */
+  workflowRowsRevision: number;
   /** CLI 完整有效 projection 返回的终态计划目录。 */
   sessionPlans: readonly ToolCallRow[];
   /** 只用于触发计划目录只读 query，不属于 conversation 协议事实。 */
@@ -152,6 +164,8 @@ const INITIAL_STATE: ConversationStoreState = {
   rendererTiming: undefined,
   optimisticCommands: [],
   loadingOlder: false,
+  hiddenTurnCount: 0,
+  workflowRowsRevision: 0,
   sessionPlans: [],
   planDirectoryRevision: 0,
   plansLoading: false,
@@ -195,6 +209,24 @@ function shouldInvalidateTurnNavigatorDirectory(frame: ConversationTopicFrame): 
     const row = delta.row;
     return row.kind === "userInput" && row.origin === "realUser";
   });
+}
+
+/**
+ * workflow 联查表只看 toolCall 行、rewind 和工具输入流；普通正文/推理 delta 不应换引用。
+ * 过度命中（任意 toolCall）只多重建几次工具事件，不会在 token 流上抖动。
+ */
+function affectsWorkflowRowProjection(delta: ConversationDelta): boolean {
+  switch (delta.op) {
+    case "row.appended":
+    case "row.upserted":
+      return delta.row.kind === "toolCall";
+    case "row.removed":
+      return true;
+    case "row.delta":
+      return delta.path === "inputText";
+    default:
+      return false;
+  }
 }
 
 function logSubagentProjectionTransition(
@@ -338,6 +370,18 @@ export class ConversationProjectionStore {
       > & { directoryRevision: number })
     | null = null;
   private closed = false;
+  /** null = 不裁剪；由 SessionPane 按产品设置启用。 */
+  private liveTurnLimit: number | null = null;
+  /** 视口是否跟随底部；只在跟随时裁头，避免用户向上阅读时滚动跳变。 */
+  private viewFollowing = true;
+  /**
+   * 帧级合帧：流式帧默认逐帧 notify，React 每帧都要走一次完整渲染。
+   * 主视图显式开启后，同一帧内的多次 setState 只通知一次；测试/其他消费者默认关闭。
+   */
+  private notifyCoalescing = false;
+  private notifyScheduled = false;
+  private notifyFrame: number | null = null;
+  private notifyTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     readonly topic: string,
@@ -385,6 +429,56 @@ export class ConversationProjectionStore {
     return { ...this.sessionOpenRendererTiming };
   }
 
+  /**
+   * 产品级 live 保留轮数。null 关闭裁剪；设置后只在视口跟随时立即生效。
+   *
+   * 裁头不可逆：历史仍在 Host/SQLite，需要时经 rows/range 重新加载。把 limit 设回 null
+   * 不会把已裁掉的行放回来。
+   */
+  setLiveTurnLimit(turnLimit: number | null): void {
+    if (this.liveTurnLimit === turnLimit) return;
+    this.liveTurnLimit = turnLimit;
+    if (this.viewFollowing) this.commitLiveRetention();
+  }
+
+  getLiveTurnLimit(): number | null {
+    return this.liveTurnLimit;
+  }
+
+  /**
+   * ConversationTimeline 同步视口是否跟随底部。只在 following=true 时裁头：
+   * 用户向上阅读期间保留已加载行，回到/接近底部时再收敛到 K 轮。
+   */
+  setViewFollowing(following: boolean): void {
+    if (this.viewFollowing === following) return;
+    this.viewFollowing = following;
+    if (this.viewFollowing) this.commitLiveRetention();
+  }
+
+  private commitLiveRetention(): void {
+    const snapshot = this.state.snapshot;
+    if (!snapshot) return;
+    const retention = this.trimSnapshotForLiveWindow(snapshot);
+    if (retention === null) return;
+    this.setState({
+      snapshot: retention.snapshot,
+      hiddenTurnCount: this.state.hiddenTurnCount + retention.removedTurns,
+      workflowRowsRevision: this.state.workflowRowsRevision + 1,
+    });
+  }
+
+  private trimSnapshotForLiveWindow(
+    snapshot: ConversationSnapshot,
+  ): { snapshot: ConversationSnapshot; removedTurns: number } | null {
+    if (this.liveTurnLimit === null) return null;
+    const trimmed = trimRowsToRecentTurns(snapshot.rows.window, this.liveTurnLimit);
+    if (trimmed === null) return null;
+    return {
+      snapshot: { ...snapshot, rows: { ...snapshot.rows, window: trimmed.window } },
+      removedTurns: trimmed.removedTurns,
+    };
+  }
+
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -406,7 +500,54 @@ export class ConversationProjectionStore {
 
   private setState(patch: Partial<ConversationStoreState>): void {
     this.state = { ...this.state, ...patch };
+    if (this.notifyCoalescing) this.scheduleNotify();
+    else this.emitStateChange();
+  }
+
+  /**
+   * 主会话 pane 开启帧级合帧；关闭时立即补发一次，保证订阅者看到最终状态。
+   */
+  setNotificationCoalescing(enabled: boolean): void {
+    if (this.notifyCoalescing === enabled) return;
+    this.notifyCoalescing = enabled;
+    if (!enabled) this.flushScheduledNotify();
+  }
+
+  private emitStateChange(): void {
     for (const listener of this.listeners) listener();
+  }
+
+  private scheduleNotify(): void {
+    if (this.notifyScheduled) return;
+    this.notifyScheduled = true;
+    const flush = () => {
+      this.notifyScheduled = false;
+      this.notifyFrame = null;
+      this.notifyTimer = null;
+      this.emitStateChange();
+    };
+    if (typeof requestAnimationFrame === "function") {
+      this.notifyFrame = requestAnimationFrame(flush);
+      return;
+    }
+    this.notifyTimer = setTimeout(flush, 16);
+  }
+
+  private flushScheduledNotify(): void {
+    this.cancelScheduledNotify();
+    if (this.notifyScheduled) {
+      this.notifyScheduled = false;
+      this.emitStateChange();
+    }
+  }
+
+  private cancelScheduledNotify(): void {
+    if (this.notifyFrame !== null && typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(this.notifyFrame);
+    }
+    if (this.notifyTimer !== null) clearTimeout(this.notifyTimer);
+    this.notifyFrame = null;
+    this.notifyTimer = null;
   }
 
   /**
@@ -683,11 +824,20 @@ export class ConversationProjectionStore {
   ): void {
     if (frame.payload.kind === "snapshot") {
       const hadAppliedBase = this.subscriptionHasAppliedBase;
-      const snapshot = this.shareSnapshotRows(frame.payload.snapshot);
+      const sharedSnapshot = this.shareSnapshotRows(frame.payload.snapshot);
+      // snapshot 是整体替换：hiddenTurnCount 以这份窗口自身被裁掉的轮数为准，
+      // 不继承旧窗口的累计值。
+      const retention =
+        this.liveTurnLimit !== null && this.viewFollowing
+          ? this.trimSnapshotForLiveWindow(sharedSnapshot)
+          : null;
+      const snapshot = retention?.snapshot ?? sharedSnapshot;
       logSubagentProjectionTransition(this.topic, this.state.snapshot, snapshot, "snapshot");
       // 规则 1：整体替换，扔掉手里的一切换新的（行对象按值复用旧引用，语义仍是整体替换）。
       this.setState({
         snapshot,
+        hiddenTurnCount: retention?.removedTurns ?? 0,
+        workflowRowsRevision: this.state.workflowRowsRevision + 1,
         planDirectoryRevision: this.state.planDirectoryRevision + 1,
         // snapshot 整体替换后 real-user query 集合可能已变，终态缓存必须失效。
         turnNavigatorDirectoryRevision: this.state.turnNavigatorDirectoryRevision + 1,
@@ -742,9 +892,28 @@ export class ConversationProjectionStore {
       }
       return;
     }
+    // rewind 目标落在已裁掉/未加载的窗口头部时，本地 apply 会把所有已加载行删掉，
+    // 但真正应保留的早期行不在手里，totalCount 也无法正确递减；必须拿新 snapshot。
+    if (rewindsIntoUnloadedHead(current, frame.payload.deltas)) {
+      const fromRowId = frame.payload.deltas.find(
+        (delta) => delta.op === "row.removed",
+      )?.fromRowId;
+      logger.warn(
+        `[v4-store] ${this.topic} rewind 目标在未加载头部 fromRowId=${fromRowId ?? "unknown"}，强制 snapshot 重订阅`,
+      );
+      // resume 会把同一条 row.removed 再投一遍并再次命中本分支；直接换代取 snapshot，
+      // 由服务端重新给出截断后的权威窗口。
+      void this.connect({ forceSnapshot: true });
+      return;
+    }
     const applied = applyConversationDeltas(current, frame.payload.deltas);
     // seq 是快照对齐水位（R-03），delta 帧应用完推进到帧右端点。
-    const next = this.shareDeltaRows({ ...applied, seq: frame.toSeq }, frame.payload.deltas);
+    const sharedNext = this.shareDeltaRows({ ...applied, seq: frame.toSeq }, frame.payload.deltas);
+    const retention =
+      this.liveTurnLimit !== null && this.viewFollowing
+        ? this.trimSnapshotForLiveWindow(sharedNext)
+        : null;
+    const next = retention?.snapshot ?? sharedNext;
     logSubagentProjectionTransition(this.topic, current, next, "deltas");
     const removedFromRowId = frame.payload.deltas.reduce<number | null>(
       (earliest, delta) =>
@@ -755,6 +924,10 @@ export class ConversationProjectionStore {
     );
     this.setState({
       snapshot: next,
+      hiddenTurnCount: this.state.hiddenTurnCount + (retention?.removedTurns ?? 0),
+      ...(frame.payload.deltas.some(affectsWorkflowRowProjection)
+        ? { workflowRowsRevision: this.state.workflowRowsRevision + 1 }
+        : {}),
       // row.removed 已给出权威裁剪边界，可以同步删掉缓存目录中的旧分支计划；
       // 完整 query 继续负责补回 wire tail 之外、但仍属于当前分支的早期计划。
       ...(removedFromRowId === null
@@ -1085,6 +1258,7 @@ export class ConversationProjectionStore {
       if (window === null) return;
       this.setState({
         snapshot: { ...current, rows: { ...current.rows, window } },
+        workflowRowsRevision: this.state.workflowRowsRevision + 1,
       });
     } catch (error) {
       // query 只读且可重发：失败不进 error 态，留给下次触发重试。
@@ -1198,6 +1372,7 @@ export class ConversationProjectionStore {
           this.setState({
             loadingOlder: false,
             snapshot: { ...current, rows: { ...current.rows, window } },
+            workflowRowsRevision: this.state.workflowRowsRevision + 1,
           });
           // navigator 已经拿到补齐首轮所需的权威 rows，必须在隐藏 rail 前先提交它们。
           logger.debug("[v4-store] 完整问题目录不足两条 query，保留首轮补齐 rows", {
@@ -1229,6 +1404,7 @@ export class ConversationProjectionStore {
       this.setState({
         loadingOlder: false,
         snapshot: { ...current, rows: { ...current.rows, window } },
+        workflowRowsRevision: this.state.workflowRowsRevision + 1,
       });
       logger.debug("[v4-store] 完整问题目录历史 rows 补拉完成", {
         loadedRows: window.length,
@@ -1414,6 +1590,9 @@ export class ConversationProjectionStore {
       topic: this.topic,
     });
     this.closed = true;
+    // close 的终态必须同步送达；取消未触发的合帧，避免 pane 卸载后仍收到一次通知。
+    this.notifyCoalescing = false;
+    this.cancelScheduledNotify();
     this.offAssemblyFault();
     this.offRuntimeRestart?.();
     this.offRuntimeLifecycle?.();

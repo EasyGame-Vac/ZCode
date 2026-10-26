@@ -273,6 +273,7 @@ export interface ZCodeAgentReadSessionParams extends ZCodeAgentSessionTarget {
 
 export interface ZCodeAgentReadSessionMessagesParams extends ZCodeAgentSessionTarget {
   afterMessageId?: string;
+  beforeMessageId?: string;
   limit?: number;
 }
 

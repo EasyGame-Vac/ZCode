@@ -44,6 +44,37 @@ interface DraftTurnRenderUnit {
   orderedRows: ConversationRow[];
 }
 
+interface CachedMaterializedUnit {
+  rows: readonly ConversationRow[];
+  sessionPhase: SessionPhase | undefined;
+  unit: ConversationTurnRenderUnit;
+}
+
+/**
+ * 历史轮的 materialize 只依赖该轮的行对象和（无 header 时的）sessionPhase。
+ * projection 对未变行做结构共享，文本流式帧不会换历史轮的行引用；这里以轮首行为 WeakMap 键，
+ * 窗口裁掉后随行对象一起回收。运行中的轮和带插件 UI 的轮不缓存（nowMs / resolver 会变）。
+ */
+const materializedUnitCache = new WeakMap<ConversationRow, CachedMaterializedUnit>();
+
+function rowsIdentityEqual(
+  previous: readonly ConversationRow[],
+  next: readonly ConversationRow[],
+): boolean {
+  if (previous.length !== next.length) return false;
+  for (let index = 0; index < previous.length; index += 1) {
+    if (previous[index] !== next[index]) return false;
+  }
+  return true;
+}
+
+function hasPluginUiWorkRow(draft: DraftTurnRenderUnit): boolean {
+  return draft.assistantWorkRows.some(
+    (row) =>
+      row.kind === "toolCall" && row.display?.kind === "mcp_tool" && Boolean(row.display.ui),
+  );
+}
+
 function isAssistantTextRow(row: ConversationRow): row is AssistantTextRow {
   return row.kind === "assistantText";
 }
@@ -432,9 +463,35 @@ export function buildConversationTurnRenderUnits(
     unit.assistantWorkRows.push(row);
   }
 
-  const materializedUnits = units.map((unit, index) =>
-    materializeDraftUnit(unit, index, units.length, options),
-  );
+  const materializedUnits = units.map((unit, index) => {
+    const isLastTurn = index === units.length - 1;
+    const firstRow = unit.orderedRows[0];
+    const sessionPhase = unit.header === undefined ? options.sessionPhase : undefined;
+    const cacheable =
+      !isLastTurn &&
+      firstRow !== undefined &&
+      !resolveTurnRunning(unit, options) &&
+      !hasPluginUiWorkRow(unit);
+    if (cacheable) {
+      const cached = materializedUnitCache.get(firstRow);
+      if (
+        cached &&
+        cached.sessionPhase === sessionPhase &&
+        rowsIdentityEqual(cached.rows, unit.orderedRows)
+      ) {
+        return cached.unit;
+      }
+    }
+    const materialized = materializeDraftUnit(unit, index, units.length, options);
+    if (cacheable) {
+      materializedUnitCache.set(firstRow, {
+        rows: unit.orderedRows,
+        sessionPhase,
+        unit: materialized,
+      });
+    }
+    return materialized;
+  });
   const keptUnits = materializedUnits.filter(shouldKeepRenderUnit);
   const normalizedUnits = keptUnits.map((unit, index) =>
     normalizeRenderUnitPosition(unit, index, keptUnits.length, options),

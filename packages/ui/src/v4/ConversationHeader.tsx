@@ -4,10 +4,11 @@ import {
   TID_V4_SESSION_TITLE,
   TID_V4_SPLIT_CLOSE,
 } from "@zcode/shared/test-ids";
-import { XIcon } from "lucide-react";
+import { XIcon, ActivityIcon } from "lucide-react";
 import { Button } from "@/components/ui/button.js";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import { runUserAction } from "@/lib/userActionTelemetry.js";
+import { PERFORMANCE_HUD_TOGGLE_EVENT } from "@/v4/conversationTurnWorkSegments.js";
 
 /** 跨 workspace pane 的归属徽标（未来跨 workspace session 的多路径徽标在此扩展）。 */
 export interface PaneWorkspaceBadge {
@@ -26,15 +27,23 @@ export interface ConversationHeaderProps {
   onClosePane?: () => void;
   /** 跨 workspace pane 的归属徽标（pane workspace ≠ shell 当前 workspace 时下发）。 */
   workspaceBadge?: PaneWorkspaceBadge;
+  /** 有活动会话时展示 Performance HUD 开关。 */
+  performanceHudSessionId?: string;
 }
 
 /**
  * pane chrome：不占布局高度，只悬浮 workspace 徽标与关闭入口（拆分入口已下线）。
  * 保留 title data 节点，供 E2E 读取投影但不恢复旧横条。
  */
-function ConversationHeaderImpl({ title, onClosePane, workspaceBadge }: ConversationHeaderProps) {
+function ConversationHeaderImpl({
+  title,
+  onClosePane,
+  workspaceBadge,
+  performanceHudSessionId,
+}: ConversationHeaderProps) {
   const { intl } = useZCodeIntl();
-  const hasFloatingActions = Boolean(workspaceBadge) || Boolean(onClosePane);
+  const hasFloatingActions =
+    Boolean(workspaceBadge) || Boolean(onClosePane) || Boolean(performanceHudSessionId);
 
   return (
     <>
@@ -56,6 +65,26 @@ function ConversationHeaderImpl({ title, onClosePane, workspaceBadge }: Conversa
                 <span className="shrink-0">{intl.formatMessage({ id: "v4Pane.remote" })}</span>
               ) : null}
             </span>
+          ) : null}
+          {performanceHudSessionId ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="icon-md"
+              data-testid="v4-performance-hud-toggle"
+              onClick={() =>
+                window.dispatchEvent(
+                  new CustomEvent(PERFORMANCE_HUD_TOGGLE_EVENT, {
+                    detail: { sessionId: performanceHudSessionId },
+                  }),
+                )
+              }
+              title={intl.formatMessage({ id: "chat.performanceHud.open" })}
+              aria-label={intl.formatMessage({ id: "chat.performanceHud.open" })}
+              className="pointer-events-auto bg-[var(--color-popover)] shadow-md"
+            >
+              <ActivityIcon className="size-4" />
+            </Button>
           ) : null}
           {onClosePane ? (
             <Button

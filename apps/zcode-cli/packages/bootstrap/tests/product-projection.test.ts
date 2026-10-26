@@ -131,6 +131,49 @@ function inputTextAppends(deltas: readonly ConversationDelta[]): string[] {
 // ── A 组：基础 turn 生命周期 ──
 
 describe("ProductProjection 黄金测试（L1）", () => {
+  it("projects exact output TPS and model output duration from ModelComplete", () => {
+    const log = new EventLog();
+    log.push(
+      SessionEventType.SessionCreated,
+      { mode: "default", contextWindow: 200_000 },
+      { timestampMs: 1_700_000_000_000 },
+    );
+    log.push(
+      SessionEventType.TurnStarted,
+      { turnNumber: 1, input: "hi" },
+      { turnId: "turn-1", timestampMs: 1_700_000_000_500 },
+    );
+    log.push(
+      SessionEventType.ModelStreaming,
+      { kind: "text_start", delta: "", done: false },
+      { turnId: "turn-1", timestampMs: 1_700_000_001_000 },
+    );
+    log.push(
+      SessionEventType.ModelStreaming,
+      { kind: "text_delta", delta: "hello", done: false },
+      { turnId: "turn-1", timestampMs: 1_700_000_002_000 },
+    );
+    log.push(
+      SessionEventType.ModelComplete,
+      {
+        content: "hello",
+        stopReason: "end_turn",
+        querySource: "main_turn",
+        usage: { inputTokens: 10, outputTokens: 100 },
+      },
+      { turnId: "turn-1", timestampMs: 1_700_000_003_000 },
+    );
+
+    const snapshot = runAll(log.events).projection.getSnapshot();
+    const header = snapshot.rows.window.find((row) => row.kind === "turnHeader");
+
+    expect(header).toMatchObject({
+      outputTokens: 100,
+      outputTokensPerSecond: 50,
+      modelOutputDurationMs: 2_000,
+    });
+  });
+
   it("Highspeed 单 Turn output tokens 由权威投影累计且不受快照观察时机影响", () => {
     const log = new EventLog();
     log.push(SessionEventType.SessionCreated, { mode: "default", contextWindow: 200_000 });

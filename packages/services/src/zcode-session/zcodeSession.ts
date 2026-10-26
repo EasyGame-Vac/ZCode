@@ -69,6 +69,7 @@ export interface ZCodeSessionReadParams extends ZCodeTaskTarget {
 
 export interface ZCodeSessionMessagesParams extends ZCodeTaskTarget {
   afterMessageId?: string;
+  beforeMessageId?: string;
   limit?: number;
 }
 

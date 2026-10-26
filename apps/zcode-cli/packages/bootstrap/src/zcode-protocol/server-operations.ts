@@ -1961,6 +1961,15 @@ export async function readMessages(context: ZCodeProtocolAgentServerContext, raw
   const params = parseParams(zcodeSessionMessagesParamsSchema, rawParams);
   const record = requireSession(context, params.sessionId);
   const allMessages = await readActiveSessionMessages(context, record);
+  // 历史抽屉向后分页：取 beforeMessageId 之前的一页，不把整段历史并入 live projection。
+  if (params.beforeMessageId) {
+    const beforeIndex = allMessages.findIndex(
+      (message) => String(message.info.id) === params.beforeMessageId,
+    );
+    if (beforeIndex <= 0) return { messages: [] };
+    const start = Math.max(0, beforeIndex - (params.limit ?? beforeIndex));
+    return { messages: allMessages.slice(start, beforeIndex) };
+  }
   const afterMessageIndex = params.afterMessageId
     ? allMessages.findIndex((message) => String(message.info.id) === params.afterMessageId)
     : -1;

@@ -431,6 +431,15 @@ type TurnModelBaseline =
   | { kind: "sourceLess" }
   | { kind: "known"; provider: string; model: string; thought: string };
 
+/**
+ * 只有结构性 delta 才可能改变 canEdit/canRetry/canFork/rewind actions。
+ * 纯 row.delta（正文、推理、工具输入、输出流）不会新增/撤销 action；每个流式 chunk
+ * 都跑全窗口 Map/扫描/JSON.stringify 是长会话 Host CPU 的主要线性成本。
+ */
+function needsCommandActionMaterialization(deltas: readonly ConversationDelta[]): boolean {
+  return deltas.some((delta) => delta.op !== "row.delta");
+}
+
 export class ProductProjection {
   private snapshot: ConversationSnapshot;
   // reducer 内部的 rowId 查找必须与 rows.window 同步；冷恢复过去每次 find 都扫描全表，
@@ -485,6 +494,8 @@ export class ProductProjection {
   private runtimeTurnIdByProductTurnId = new Map<string, string>();
   private productTurnSplitOrdinalByRuntimeTurnId = new Map<string, number>();
   private currentProductTurnStartedAtMs: number | null = null;
+  /** 当前模型步骤首个输出事件的时间；ModelComplete 用它计算精确 TPS。 */
+  private modelOutputStreamStartedAt: number | null = null;
   // Highspeed 分享需要的真实耗时由 CLI 事件聚合，避免 renderer 离场后丢失拆分数据。
   private highspeedModelDurationByTurnId = new Map<string, number>();
   private highspeedToolIntervalsByTurnId = new Map<string, Map<string, HighspeedToolInterval>>();
@@ -1081,9 +1092,10 @@ export class ProductProjection {
     // row、命令 target 与 actions 必须属于同一个 materialization transaction。
     // 旧实现只维护 side-map/最新行判断，UI action 由别处推断，cold/tool-only/failed
     // 轮会出现“入口可见但 target 不可解析”，新目标出现后旧入口也不会撤销。
-    const deltas = materializeActions
-      ? [...reducedWithSubagents, ...this.materializeCommandRowActions(reducedWithSubagents)]
-      : reducedWithSubagents;
+    const deltas =
+      materializeActions && needsCommandActionMaterialization(reducedWithSubagents)
+        ? [...reducedWithSubagents, ...this.materializeCommandRowActions(reducedWithSubagents)]
+        : reducedWithSubagents;
     const finalDeltas = this.attachRevision(clearSettledOutputPreviews(deltas));
     if (this.hydrationAccumulator) {
       applyConversationDeltasMutable(this.hydrationAccumulator, finalDeltas);
@@ -1174,6 +1186,7 @@ export class ProductProjection {
       this.productTurnSplitOrdinalByRuntimeTurnId,
     );
     clone.currentProductTurnStartedAtMs = this.currentProductTurnStartedAtMs;
+    clone.modelOutputStreamStartedAt = this.modelOutputStreamStartedAt;
     clone.highspeedModelDurationByTurnId = new Map(this.highspeedModelDurationByTurnId);
     clone.highspeedToolIntervalsByTurnId = new Map(
       [...this.highspeedToolIntervalsByTurnId].map(([turnId, intervals]) => [
@@ -1224,6 +1237,7 @@ export class ProductProjection {
     this.runtimeTurnIdByProductTurnId = candidate.runtimeTurnIdByProductTurnId;
     this.productTurnSplitOrdinalByRuntimeTurnId = candidate.productTurnSplitOrdinalByRuntimeTurnId;
     this.currentProductTurnStartedAtMs = candidate.currentProductTurnStartedAtMs;
+    this.modelOutputStreamStartedAt = candidate.modelOutputStreamStartedAt;
     this.highspeedModelDurationByTurnId = candidate.highspeedModelDurationByTurnId;
     this.highspeedToolIntervalsByTurnId = candidate.highspeedToolIntervalsByTurnId;
     this.deliveryByPendingInputId = candidate.deliveryByPendingInputId;
@@ -2121,6 +2135,8 @@ export class ProductProjection {
       };
     }
     const headerBase = this.rowBase(event, turnId, turnId);
+    // 新一轮从空分母开始；失败/取消的旧模型步骤不能把时长带进这一轮。
+    this.modelOutputStreamStartedAt = null;
     const header: TurnHeaderRow = {
       ...headerBase,
       kind: "turnHeader",
@@ -2640,6 +2656,17 @@ export class ProductProjection {
       return [];
     }
     const payload = fact.stream;
+    if (
+      payload.kind === "text_start" ||
+      payload.kind === "text_delta" ||
+      payload.kind === "reasoning_start" ||
+      payload.kind === "reasoning_delta" ||
+      payload.kind === "tool_input_start" ||
+      payload.kind === "tool_input_delta"
+    ) {
+      // 首个输出事件固定分母起点；后续 delta 不刷新，避免把流式时长算短。
+      this.modelOutputStreamStartedAt ??= event.timestamp.getTime();
+    }
     switch (payload.kind) {
       case "text_start":
         return this.openTextRow(event, fact);
@@ -4868,6 +4895,24 @@ export class ProductProjection {
     // fileChanges 是 child session 自己的 workspace 事实，必须独立投影到 child turn header。
     const supportsFileChangeSummary = isMainTurn || payload.querySource === "subagent";
     const usage = payload.usage as ModelUsage;
+    const completedAt = event.timestamp.getTime();
+    const outputStartedAt = this.modelOutputStreamStartedAt;
+    const outputTokensPerSecond =
+      isMainTurn &&
+      outputStartedAt !== null &&
+      completedAt > outputStartedAt &&
+      (usage.outputTokens ?? 0) > 0
+        ? ((usage.outputTokens ?? 0) * 1000) / (completedAt - outputStartedAt)
+        : undefined;
+    const outputDurationMs =
+      isMainTurn &&
+      outputStartedAt !== null &&
+      completedAt > outputStartedAt &&
+      (usage.outputTokens ?? 0) > 0
+        ? completedAt - outputStartedAt
+        : 0;
+    // 每个模型步骤独立计时；tool loop 的下一步会重新从首个输出事件开始。
+    this.modelOutputStreamStartedAt = null;
     const deltas: ConversationDelta[] = [];
     const turnId = this.turnIdOf(event);
     const headerRowId = this.turnHeaderRowIdByTurnId.get(turnId);
@@ -4895,7 +4940,16 @@ export class ProductProjection {
             // Bug 根因：Renderer 观察 running 快照的时机不可靠，continuous 可合并更新，
             // replayable 也可能首次恢复即终态。单 Turn token 必须在权威事件投影中累计。
             ...(isMainTurn
-              ? { outputTokens: (headerRow.outputTokens ?? 0) + (usage.outputTokens ?? 0) }
+              ? {
+                  outputTokens: (headerRow.outputTokens ?? 0) + (usage.outputTokens ?? 0),
+                  ...(outputTokensPerSecond !== undefined ? { outputTokensPerSecond } : {}),
+                  ...(outputDurationMs > 0
+                    ? {
+                        modelOutputDurationMs:
+                          (headerRow.modelOutputDurationMs ?? 0) + outputDurationMs,
+                      }
+                    : {}),
+                }
               : {}),
           },
         });

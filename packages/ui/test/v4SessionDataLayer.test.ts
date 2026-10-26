@@ -2174,3 +2174,118 @@ describe("ConversationProjectionStore.loadOlder", () => {
     expect(mergeOlderRows(window, [])).toBeNull();
   });
 });
+
+// ── Live retention ──
+
+function turnAssistantRow(rowId: number, turnId: string): ConversationRow {
+  return {
+    rowId,
+    turnId,
+    createdAt: 1,
+    createdAtSeq: rowId,
+    kind: "assistantText",
+    text: `assistant-${rowId}`,
+    state: "streaming",
+  };
+}
+
+function turnRows(turnCount: number): ConversationRow[] {
+  const rows: ConversationRow[] = [];
+  for (let index = 1; index <= turnCount; index += 1) {
+    const turnId = `t${index}`;
+    rows.push(turnHeaderRow(index * 2 - 1, turnId));
+    rows.push(turnAssistantRow(index * 2, turnId));
+  }
+  return rows;
+}
+
+describe("Conversation live retention", () => {
+  let transport: FakeTransport;
+  let store: ConversationProjectionStore;
+
+  beforeEach(() => {
+    transport = new FakeTransport();
+    store = new ConversationProjectionStore("conversation/s1", transport);
+    transport.onFrame((frame, context) => store.handleFrame(frame, context));
+  });
+
+  async function connectWithTurns(turnCount: number): Promise<ConversationSnapshot> {
+    const window = turnRows(turnCount);
+    const snapshot = makeSnapshot({
+      seq: 5,
+      rows: { window, totalCount: window.length, firstRowId: 1 },
+    });
+    transport.subscribeImpl = (params, subscriptionId) => ({
+      ack: { subscriptionId, mode: "snapshot", logEpoch: "epoch-1" },
+      initialFrame: makeFrame(
+        subscriptionId,
+        0,
+        5,
+        { kind: "snapshot", snapshot },
+        params.topic,
+      ),
+    });
+    await store.connect();
+    return snapshot;
+  }
+
+  it("启用后只保留最近 K 轮，firstRowId / totalCount 不变", async () => {
+    await connectWithTurns(5);
+
+    store.setLiveTurnLimit(3);
+
+    const state = store.getState();
+    expect(state.snapshot!.rows.window.map((row) => row.rowId)).toEqual([5, 6, 7, 8, 9, 10]);
+    expect(state.snapshot!.rows.firstRowId).toBe(1);
+    expect(state.snapshot!.rows.totalCount).toBe(10);
+    expect(state.hiddenTurnCount).toBe(2);
+  });
+
+  it("following=false 时保留已加载历史，回到 following=true 再收敛", async () => {
+    await connectWithTurns(5);
+    store.setLiveTurnLimit(3);
+    store.setViewFollowing(false);
+
+    transport.emit(
+      makeFrame("sub-1", 5, 6, {
+        kind: "deltas",
+        deltas: [
+          { op: "row.appended", row: turnHeaderRow(11, "t6") },
+          { op: "row.appended", row: turnAssistantRow(12, "t6") },
+        ],
+      }),
+    );
+
+    expect(store.getState().snapshot!.rows.window.map((row) => row.rowId)).toEqual([
+      5, 6, 7, 8, 9, 10, 11, 12,
+    ]);
+    expect(store.getState().hiddenTurnCount).toBe(2);
+
+    store.setViewFollowing(true);
+
+    expect(store.getState().snapshot!.rows.window.map((row) => row.rowId)).toEqual([
+      7, 8, 9, 10, 11, 12,
+    ]);
+    expect(store.getState().hiddenTurnCount).toBe(3);
+  });
+
+  it("rewind 目标在未加载头部时强制 snapshot 重订阅，不在本地清空窗口", async () => {
+    await connectWithTurns(5);
+    store.setLiveTurnLimit(3);
+    const before = store.getState().snapshot!.rows.window.map((row) => row.rowId);
+    const subscribeCallsBefore = transport.subscribeCalls.length;
+
+    transport.emit(
+      makeFrame("sub-1", 5, 6, {
+        kind: "deltas",
+        deltas: [{ op: "row.removed", fromRowId: 3 }],
+      }),
+    );
+    await flushMicrotasks();
+
+    expect(transport.subscribeCalls.length).toBe(subscribeCallsBefore + 1);
+    // forceSnapshot 通过丢失 base 表达；服务端据此返回完整 snapshot。
+    expect(transport.subscribeCalls.at(-1)?.base).toBeUndefined();
+    expect(store.getState().snapshot!.rows.window.map((row) => row.rowId)).toEqual(before);
+  });
+});

@@ -35,6 +35,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import type { BundledTheme } from "shiki";
@@ -1311,6 +1312,42 @@ export const messageResponsePropsAreEqual = (
   nextProps.onOpenFileLink === prevProps.onOpenFileLink &&
   nextProps.onOpenExternalUrl === prevProps.onOpenExternalUrl;
 
+// 流式 markdown 的预处理/lex 是 O(文本长度) 每 chunk，长回答累计 O(L²)。
+// 只把“提交给解析管线”的文本按 50ms 合并；完成态仍立即使用最终全文。
+const STREAMING_MARKDOWN_COMMIT_INTERVAL_MS = 50;
+
+function useStreamingMarkdownCommit(markdown: string, streaming: boolean): string {
+  const [committed, setCommitted] = useState(markdown);
+  const latestRef = useRef(markdown);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  latestRef.current = markdown;
+
+  useEffect(() => {
+    if (!streaming) {
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      if (latestRef.current !== committed) setCommitted(latestRef.current);
+      return;
+    }
+    if (latestRef.current === committed || timerRef.current !== null) return;
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
+      setCommitted(latestRef.current);
+    }, STREAMING_MARKDOWN_COMMIT_INTERVAL_MS);
+  }, [committed, markdown, streaming]);
+
+  useEffect(
+    () => () => {
+      if (timerRef.current !== null) clearTimeout(timerRef.current);
+    },
+    [],
+  );
+
+  return streaming ? committed : markdown;
+}
+
 export const MessageResponse = memo(
   ({
     className,
@@ -1333,12 +1370,13 @@ export const MessageResponse = memo(
     const wrapLongLines = forceCodeWrap || codePreviewSettings.wrapLongLines;
     const rawMarkdown = useMemo(() => extractCodeText(children), [children]);
     const renderStreaming = streaming;
+    const committedMarkdown = useStreamingMarkdownCommit(rawMarkdown, renderStreaming);
     const projectedCitationMarkdown = useMemo(
       () =>
         renderZCodeFileCitations
-          ? projectZCodeFileCitations(rawMarkdown, { streaming: renderStreaming }).visibleText
-          : rawMarkdown,
-      [rawMarkdown, renderStreaming, renderZCodeFileCitations],
+          ? projectZCodeFileCitations(committedMarkdown, { streaming: renderStreaming }).visibleText
+          : committedMarkdown,
+      [committedMarkdown, renderStreaming, renderZCodeFileCitations],
     );
     const targetMarkdown = useMemo(
       () =>
