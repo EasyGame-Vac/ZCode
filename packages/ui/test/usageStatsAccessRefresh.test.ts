@@ -9,6 +9,7 @@ import { ServiceProvider } from "@/hooks/useServices.js";
 import {
   shouldRefreshCodingPlanUsageOnAccess,
   useCodingPlanUsageStats,
+  useModelRequestRate,
 } from "@/hooks/useUsageStats.js";
 
 const accountAccessByScope = new Map<string, ZCodeAccountAccess>();
@@ -241,3 +242,142 @@ function createDetailSummary() {
     averageDailyCreditsTrend: null,
   };
 }
+
+describe("useModelRequestRate", () => {
+  type ModelRateResult = NonNullable<
+    Awaited<ReturnType<NonNullable<IServiceAccessor["usageStatsService"]["getModelRequestRate"]>>>
+  >;
+
+  function createModelRateSnapshot(overrides: Partial<ModelRateResult> = {}): ModelRateResult {
+    return {
+      providerId: "new-provider",
+      modelId: "deepseek-v4.1-flash",
+      windowMs: 300_000,
+      windowStart: 1_000,
+      windowEnd: 301_000,
+      sampleCount: 4,
+      outputTokens: 1_200,
+      outputDurationMs: 20_000,
+      tokensPerSecond: 60,
+      ttftP50Ms: 800,
+      ttftP90Ms: 1_400,
+      requestDurationP50Ms: 5_000,
+      requestDurationP90Ms: 9_000,
+      cacheHitRate: 0.95,
+      ...overrides,
+    };
+  }
+
+  function wrapperFor(usageStatsService: object) {
+    const services = { usageStatsService } as unknown as IServiceAccessor;
+    return ({ children }: { children: ReactNode }) =>
+      createElement(ServiceProvider, { services }, children);
+  }
+
+  it("按 provider/model/windowMs 拉取模型速率", async () => {
+    const snapshot = createModelRateSnapshot();
+    const getModelRequestRate = vi.fn(async () => snapshot);
+    const hook = renderHook(
+      () =>
+        useModelRequestRate({
+          providerId: "new-provider",
+          modelId: "deepseek-v4.1-flash",
+          windowMs: 300_000,
+          pollIntervalMs: 60_000,
+        }),
+      { wrapper: wrapperFor({ getModelRequestRate }) },
+    );
+
+    await waitFor(() => {
+      expect(hook.result.current.snapshot).toBe(snapshot);
+    });
+    expect(getModelRequestRate).toHaveBeenCalledWith({
+      providerId: "new-provider",
+      modelId: "deepseek-v4.1-flash",
+      windowMs: 300_000,
+    });
+    expect(hook.result.current.error).toBeNull();
+    hook.unmount();
+  });
+
+  it("enabled=false 或 host 不支持该方法时不发请求", async () => {
+    const disabled = vi.fn();
+    const disabledHook = renderHook(
+      () =>
+        useModelRequestRate({
+          providerId: "p",
+          modelId: "m",
+          windowMs: 60_000,
+          enabled: false,
+        }),
+      { wrapper: wrapperFor({ getModelRequestRate: disabled }) },
+    );
+    expect(disabled).not.toHaveBeenCalled();
+    expect(disabledHook.result.current.snapshot).toBeNull();
+    disabledHook.unmount();
+
+    const unsupportedHook = renderHook(
+      () => useModelRequestRate({ providerId: "p", modelId: "m", windowMs: 60_000 }),
+      { wrapper: wrapperFor({}) },
+    );
+    expect(unsupportedHook.result.current.snapshot).toBeNull();
+    expect(unsupportedHook.result.current.error).toBeNull();
+    unsupportedHook.unmount();
+  });
+
+  it("切换窗口后旧窗口的迟到响应不会覆盖新结果", async () => {
+    const first = createDeferred<ModelRateResult>();
+    const second = createDeferred<ModelRateResult>();
+    const getModelRequestRate = vi
+      .fn()
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+
+    const hook = renderHook(
+      ({ windowMs }: { windowMs: number }) =>
+        useModelRequestRate({
+          providerId: "p",
+          modelId: "m",
+          windowMs,
+          pollIntervalMs: 60_000,
+        }),
+      {
+        initialProps: { windowMs: 60_000 },
+        wrapper: wrapperFor({ getModelRequestRate }),
+      },
+    );
+
+    hook.rerender({ windowMs: 300_000 });
+    second.resolve(createModelRateSnapshot({ windowMs: 300_000, tokensPerSecond: 80 }));
+    await waitFor(() => {
+      expect(hook.result.current.snapshot?.tokensPerSecond).toBe(80);
+    });
+
+    first.resolve(createModelRateSnapshot({ windowMs: 60_000, tokensPerSecond: 10 }));
+    await Promise.resolve();
+    expect(hook.result.current.snapshot?.tokensPerSecond).toBe(80);
+    hook.unmount();
+  });
+
+  it("轮询间隔到达后刷新，卸载后停止", async () => {
+    const getModelRequestRate = vi.fn(async () => createModelRateSnapshot());
+    const hook = renderHook(
+      () =>
+        useModelRequestRate({
+          providerId: "p",
+          modelId: "m",
+          windowMs: 60_000,
+          pollIntervalMs: 250,
+        }),
+      { wrapper: wrapperFor({ getModelRequestRate }) },
+    );
+
+    await waitFor(() => {
+      expect(getModelRequestRate.mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+    hook.unmount();
+    const callsAfterUnmount = getModelRequestRate.mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(getModelRequestRate.mock.calls.length).toBe(callsAfterUnmount);
+  });
+});

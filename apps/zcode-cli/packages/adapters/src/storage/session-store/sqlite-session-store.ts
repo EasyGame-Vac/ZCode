@@ -29,6 +29,8 @@ import type {
   MessagePart,
   MessageWithParts,
   ModelRequestTimingRecord,
+  ModelRequestRateQueryInput,
+  ModelRequestRateQueryResult,
   ModelUsageRecord,
   PartId,
   PermissionRuleset,
@@ -853,6 +855,12 @@ export class SqliteSessionStore
 
   async queryTaskUsage(input: TaskUsageQueryInput): Promise<TaskUsageQueryResult> {
     return usageRepository.queryTaskUsage(this.db, input);
+  }
+
+  async queryModelRequestRate(
+    input: ModelRequestRateQueryInput,
+  ): Promise<ModelRequestRateQueryResult> {
+    return usageRepository.queryModelRequestRate(this.db, input);
   }
 
   async queryRecentModelRequestTimings(input: {

@@ -81,6 +81,71 @@ export function clearAppUsageE2EFixture(e2eHomeDir: string): void {
   }
 }
 
+/**
+ * PERF HUD E2E：为当前有效 provider/model 写入最近一分钟内的请求样本。
+ *
+ * 运行中写入，依赖 WAL + busy_timeout 与 CLI 的读连接共存；session_id 取库里最新的
+ * 会话（foreign_keys 打开时也能满足 FK）。样本故意做成 4 条 4000ms/500 tokens，
+ * 保证 1m 窗口有稳定的加权速率可断言。
+ */
+export function seedModelRateE2EFixture(input: {
+  e2eHomeDir: string;
+  providerId: string;
+  modelId: string;
+}): void {
+  const database = new DatabaseSync(appUsageDatabasePath(input.e2eHomeDir));
+  try {
+    database.exec("pragma busy_timeout = 4000;");
+    const session = database
+      .prepare("select id from session order by time_updated desc limit 1")
+      .get() as { id?: string } | undefined;
+    if (!session?.id) {
+      throw new Error("PERF HUD E2E: 数据库里没有可用的 session 行");
+    }
+    const now = Date.now();
+    const insert = database.prepare(
+      `insert or replace into model_usage (
+        id, logical_request_id, session_id, turn_id, query_source, provider_id, model_id,
+        status, started_at, first_token_at, completed_at, duration_ms, time_to_first_token_ms,
+        input_tokens, output_tokens, computed_total_tokens
+      ) values (?, ?, ?, ?, 'main_turn', ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    database.exec("begin immediate");
+    for (let index = 0; index < 4; index += 1) {
+      const startedAt = now - 20_000 + index * 3_000;
+      const firstTokenAt = startedAt + 100;
+      const completedAt = firstTokenAt + 4_000;
+      const id = `perf-hud-rate-${now}-${index}`;
+      insert.run(
+        id,
+        `request-${id}`,
+        session.id,
+        `turn-perf-hud-${now}`,
+        input.providerId,
+        input.modelId,
+        startedAt,
+        firstTokenAt,
+        completedAt,
+        4_100,
+        100,
+        1_000,
+        500,
+        1_500,
+      );
+    }
+    database.exec("commit");
+  } catch (error) {
+    try {
+      database.exec("rollback");
+    } catch {
+      /* 事务未开启时 rollback 会抛错，忽略即可。 */
+    }
+    throw error;
+  } finally {
+    database.close();
+  }
+}
+
 async function seedHistory(
   options: { cliEntryPoint: string; e2eHomeDir: string; workspacePath: string },
   sessionId: string,

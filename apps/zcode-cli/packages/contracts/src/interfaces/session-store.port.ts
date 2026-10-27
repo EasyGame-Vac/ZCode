@@ -1075,6 +1075,36 @@ export interface TaskUsageQueryInput {
   sessionID: SessionId;
 }
 
+/**
+ * 模型级请求速率的窗口查询。
+ *
+ * 归属是 provider+model 而不是会话：窗口成员是 `started_at ∈ [since, until]` 的已完成
+ * main_turn 请求，由调用端用 CLI 时钟给出边界。
+ */
+export interface ModelRequestRateQueryInput {
+  /** 含下界（unix ms）。 */
+  since: number;
+  /** 含上界（unix ms），通常为 CLI 当前时刻。 */
+  until: number;
+  providerId: string;
+  modelId: string;
+}
+
+export interface ModelRequestRateQueryResult {
+  /** 参与加权速率与百分位的请求数。 */
+  sampleCount: number;
+  outputTokens: number;
+  /** Σ(completed_at - first_token_at)，只统计有效速率样本。 */
+  outputDurationMs: number;
+  tokensPerSecond: number | null;
+  ttftP50Ms: number | null;
+  ttftP90Ms: number | null;
+  requestDurationP50Ms: number | null;
+  requestDurationP90Ms: number | null;
+  /** 窗口内全部 completed main_turn 请求的 cache_read ÷ input。 */
+  cacheHitRate: number | null;
+}
+
 export interface TaskUsageQueryResult {
   sessionID: SessionId;
   totalTokens: number;
@@ -1095,6 +1125,7 @@ export interface UsageStorePort {
   pruneUsage(input?: { beforeTime?: number }): Promise<void>;
   queryAppUsage(input: AppUsageQueryInput): Promise<AppUsageQueryResult>;
   queryTaskUsage(input: TaskUsageQueryInput): Promise<TaskUsageQueryResult>;
+  queryModelRequestRate(input: ModelRequestRateQueryInput): Promise<ModelRequestRateQueryResult>;
 }
 
 export interface LocalSettingStorePort {

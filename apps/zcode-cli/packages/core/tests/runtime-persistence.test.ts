@@ -4875,6 +4875,19 @@ function createRecordingSessionStore(): RecordingSessionStore {
         ...buildUsageTotals(records),
       };
     },
+    async queryModelRequestRate() {
+      return {
+        sampleCount: 0,
+        outputTokens: 0,
+        outputDurationMs: 0,
+        tokensPerSecond: null,
+        ttftP50Ms: null,
+        ttftP90Ms: null,
+        requestDurationP50Ms: null,
+        requestDurationP90Ms: null,
+        cacheHitRate: null,
+      };
+    },
   };
 }
 

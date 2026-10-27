@@ -77,6 +77,7 @@ function createUsageStatsServiceForTest(params: {
     accountAccess: ZCodeAccountAccess;
   }) => Promise<{ apiKey?: string }>;
   getAppUsageStats?: IZCodeAgentService["getAppUsageStats"];
+  getModelRequestRate?: IZCodeAgentService["getModelRequestRate"];
 }) {
   const service = createUsageStatsService({
     apiClient: params.apiClient ?? {
@@ -123,6 +124,24 @@ function createUsageStatsServiceForTest(params: {
     env: params.env,
     zcodeAgentService: {
       getAppUsageStats: params.getAppUsageStats ?? vi.fn(async () => createAppUsageSnapshot()),
+      getModelRequestRate:
+        params.getModelRequestRate ??
+        vi.fn(async () => ({
+          providerId: "p",
+          modelId: "m",
+          windowMs: 60_000,
+          windowStart: 0,
+          windowEnd: 60_000,
+          sampleCount: 0,
+          outputTokens: 0,
+          outputDurationMs: 0,
+          tokensPerSecond: null,
+          ttftP50Ms: null,
+          ttftP90Ms: null,
+          requestDurationP50Ms: null,
+          requestDurationP90Ms: null,
+          cacheHitRate: null,
+        })),
     },
   });
   return {
@@ -504,6 +523,43 @@ describe("createUsageStatsService", () => {
       timeZone: "Asia/Shanghai",
     });
     expect(snapshot.range).toBe("all");
+  });
+
+  it("模型速率透传 provider/model/windowMs 并返回 agent 聚合结果", async () => {
+    const getModelRequestRate = vi.fn(async () => ({
+      providerId: "new-provider",
+      modelId: "deepseek-v4.1-flash",
+      windowMs: 300_000,
+      windowStart: 1_000,
+      windowEnd: 301_000,
+      sampleCount: 4,
+      outputTokens: 1_200,
+      outputDurationMs: 20_000,
+      tokensPerSecond: 60,
+      ttftP50Ms: 800,
+      ttftP90Ms: 1_400,
+      requestDurationP50Ms: 5_000,
+      requestDurationP90Ms: 9_000,
+      cacheHitRate: 0.95,
+    }));
+    const service = createUsageStatsServiceForTest({
+      providers: [],
+      getModelRequestRate,
+    });
+
+    const result = await service.getModelRequestRate?.({
+      providerId: "new-provider",
+      modelId: "deepseek-v4.1-flash",
+      windowMs: 300_000,
+    });
+
+    expect(getModelRequestRate).toHaveBeenCalledWith({
+      providerId: "new-provider",
+      modelId: "deepseek-v4.1-flash",
+      windowMs: 300_000,
+    });
+    expect(result?.tokensPerSecond).toBe(60);
+    expect(result?.sampleCount).toBe(4);
   });
 
   it("严格指定个人 Coding Plan 时使用 provider apiKey 的 monitor 数据且不回退本地", async () => {

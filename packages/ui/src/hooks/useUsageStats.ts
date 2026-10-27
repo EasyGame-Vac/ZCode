@@ -9,6 +9,7 @@ import type {
   ZCodeAccountAccess,
   ZCodeProviderAccountAccess,
 } from "@zcode/shared";
+import type { V4UsageModelRateParams, V4UsageModelRateResult } from "@zcode/shared/zcode-protocol-v4";
 import { logger } from "@/logger.js";
 import { useServices } from "@/hooks/useServices.js";
 import { useStableAccountAccess } from "@/hooks/useStableAccountAccess.js";
@@ -388,4 +389,84 @@ export function useCodingPlanUsageStats(
   }, [refresh]);
 
   return { ...state, refresh };
+}
+
+export interface ModelRequestRateState {
+  snapshot: V4UsageModelRateResult | null;
+  loading: boolean;
+  error: string | null;
+}
+
+const MODEL_REQUEST_RATE_POLL_INTERVAL_MS = 2_000;
+
+/**
+ * 模型级、跨会话的请求吞吐。
+ *
+ * 窗口由 CLI 时钟计算（只传 windowMs），因此 1m/5m 这类短窗口不会因为当前会话的
+ * agent 轮跑得太久而变空。旧 host 没有该方法时返回 null，由 HUD 显示 “—”。
+ */
+export function useModelRequestRate(options: {
+  providerId: string;
+  modelId: string;
+  windowMs: number;
+  enabled?: boolean;
+  pollIntervalMs?: number;
+}): ModelRequestRateState {
+  const { usageStatsService } = useServices();
+  const { providerId, modelId, windowMs, enabled = true } = options;
+  const pollIntervalMs = Math.max(
+    250,
+    options.pollIntervalMs ?? MODEL_REQUEST_RATE_POLL_INTERVAL_MS,
+  );
+  const [state, setState] = useState<ModelRequestRateState>({
+    snapshot: null,
+    loading: false,
+    error: null,
+  });
+  const requestVersionRef = useRef(0);
+  const supported = typeof usageStatsService?.getModelRequestRate === "function";
+
+  const refresh = useCallback(async () => {
+    if (!enabled || !supported || !providerId || !modelId) return;
+    const requestVersion = ++requestVersionRef.current;
+    try {
+      const snapshot = await usageStatsService.getModelRequestRate!({
+        providerId,
+        modelId,
+        windowMs,
+      } satisfies V4UsageModelRateParams);
+      if (requestVersionRef.current !== requestVersion) return;
+      setState({ snapshot, loading: false, error: null });
+    } catch (error) {
+      if (requestVersionRef.current !== requestVersion) return;
+      const message = getErrorMessage(error);
+      logger.warn("[useModelRequestRate] 读取模型请求速率失败", {
+        providerId,
+        modelId,
+        windowMs,
+        error: message,
+      });
+      // 轮询失败保留上一份成功快照，避免浮层在请求间隙闪烁。
+      setState((current) => ({ ...current, loading: false, error: message }));
+    }
+  }, [enabled, supported, usageStatsService, providerId, modelId, windowMs]);
+
+  useEffect(() => {
+    if (!enabled || !supported) {
+      requestVersionRef.current += 1;
+      setState({ snapshot: null, loading: false, error: null });
+      return;
+    }
+    // 切换窗口时先清掉旧窗口的数字，避免新标签下短暂显示上一窗口的速率。
+    requestVersionRef.current += 1;
+    setState({ snapshot: null, loading: true, error: null });
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), pollIntervalMs);
+    return () => {
+      requestVersionRef.current += 1;
+      window.clearInterval(timer);
+    };
+  }, [enabled, supported, refresh, pollIntervalMs]);
+
+  return state;
 }

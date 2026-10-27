@@ -200,6 +200,7 @@ import type {
   ZCodeAgentRuntimeLifecycleEvent,
   ZCodeAgentAddPluginMarketplaceParams,
   ZCodeAgentAppUsageParams,
+  ZCodeAgentModelRequestRateParams,
   ZCodeAgentCancelPluginOperationParams,
   ZCodeAgentCompactParams,
   ZCodeAgentConfigurePluginParams,
@@ -343,6 +344,7 @@ import {
   v4ConversationSubscribeResultSchema,
   v4ConversationUsageResultSchema,
   v4SessionsIndexSubscribeResultSchema,
+  v4UsageModelRateResultSchema,
   v4UsageStatsResultSchema,
   v4WorkspaceConfigSubscribeResultSchema,
   workspaceConfigTopic,
@@ -4191,6 +4193,26 @@ export function createZCodeAgentService(
         V4_METHODS.usageStats,
         { range: params.range, timeZone: params.timeZone },
         v4UsageStatsResultSchema,
+      );
+    },
+
+    async getModelRequestRate(params: ZCodeAgentModelRequestRateParams) {
+      // 与 getAppUsageStats 同源：model_usage 在全局 session 库，任意可复用的 active
+      // client 都能拿到跨会话数据。跳过已 disposed 的 entry，避免把请求发进正在退出的进程。
+      const active = [...activeClientsByWorkspaceKey.values()].find(
+        (entry) => !entry.client.isDisposed,
+      );
+      if (!active) {
+        throw new Error("no_active_workspace");
+      }
+      return active.client.request(
+        V4_METHODS.usageModelRate,
+        {
+          providerId: params.providerId,
+          modelId: params.modelId,
+          windowMs: params.windowMs,
+        },
+        v4UsageModelRateResultSchema,
       );
     },
 

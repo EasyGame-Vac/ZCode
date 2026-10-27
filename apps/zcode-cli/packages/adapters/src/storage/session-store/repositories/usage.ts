@@ -8,6 +8,8 @@ import type {
   AppUsageToolRow,
   TaskUsageQueryInput,
   TaskUsageQueryResult,
+  ModelRequestRateQueryInput,
+  ModelRequestRateQueryResult,
   ModelRequestTimingRecord,
   ModelUsageRecord,
   MessageId,
@@ -588,6 +590,126 @@ export async function queryAppUsage(
       modelId: d.modelId ?? null,
       totalTokens: Number(d.totalTokens),
     })),
+  };
+}
+
+const MODEL_RATE_MIN_GENERATION_MS = 300;
+const MODEL_RATE_MAX_SANE_TPS = 20_000;
+function modelRatePercentile(values: number[], percentile: number): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((left, right) => left - right);
+  const position = ((sorted.length - 1) * percentile) / 100;
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  const lowerValue = sorted[lower];
+  const upperValue = sorted[upper];
+  if (lowerValue === undefined || upperValue === undefined) return null;
+  return lower === upper ? lowerValue : lowerValue + (upperValue - lowerValue) * (position - lower);
+}
+
+/**
+ * 按 provider+model 聚合窗口内已完成主轮请求的吞吐与延迟。
+ *
+ * 归属是模型而不是会话：同一模型在不同会话里的 decode 速率可比，按会话统计既缺样本
+ * 又会让长 turn 把短窗口挤空。窗口成员由 `started_at` 落在 [since, until] 决定，走
+ * `model_usage_started_model_idx`；更细的样本合理性过滤在 JS 侧做，便于与 HUD 口径
+ * （首 token → 完成）保持一致。
+ */
+export async function queryModelRequestRate(
+  db: DatabaseSync,
+  input: ModelRequestRateQueryInput,
+): Promise<ModelRequestRateQueryResult> {
+  const rows = db
+    .prepare(
+      `select
+         started_at as startedAt,
+         first_token_at as firstTokenAt,
+         completed_at as completedAt,
+         duration_ms as durationMs,
+         time_to_first_token_ms as timeToFirstTokenMs,
+         output_tokens as outputTokens,
+         input_tokens as inputTokens,
+         cache_read_input_tokens as cacheReadTokens
+       from model_usage
+       where started_at >= ?
+         and started_at <= ?
+         and provider_id = ?
+         and model_id = ?
+         and query_source = 'main_turn'
+         and status = 'completed'`,
+    )
+    .all(
+      input.since,
+      input.until,
+      input.providerId,
+      input.modelId,
+    ) as Array<{
+    startedAt: number;
+    firstTokenAt: number | null;
+    completedAt: number | null;
+    durationMs: number | null;
+    timeToFirstTokenMs: number | null;
+    outputTokens: number;
+    inputTokens: number;
+    cacheReadTokens: number;
+  }>;
+
+  let sampleCount = 0;
+  let outputTokens = 0;
+  let outputDurationMs = 0;
+  let inputTokens = 0;
+  let cacheReadTokens = 0;
+  const ttftValues: number[] = [];
+  const requestDurationValues: number[] = [];
+
+  for (const row of rows) {
+    inputTokens += Number(row.inputTokens);
+    cacheReadTokens += Number(row.cacheReadTokens);
+
+    const startedAt = Number(row.startedAt);
+    const firstTokenAt = row.firstTokenAt === null ? null : Number(row.firstTokenAt);
+    const completedAt = row.completedAt === null ? null : Number(row.completedAt);
+    const rowOutputTokens = Number(row.outputTokens);
+    if (
+      firstTokenAt === null ||
+      completedAt === null ||
+      !Number.isFinite(firstTokenAt) ||
+      !Number.isFinite(completedAt) ||
+      completedAt <= firstTokenAt ||
+      rowOutputTokens <= 0
+    ) {
+      continue;
+    }
+    const generationMs = completedAt - firstTokenAt;
+    if (generationMs < MODEL_RATE_MIN_GENERATION_MS) continue;
+    const requestTps = (rowOutputTokens * 1000) / generationMs;
+    if (!Number.isFinite(requestTps) || requestTps > MODEL_RATE_MAX_SANE_TPS) continue;
+
+    sampleCount += 1;
+    outputTokens += rowOutputTokens;
+    outputDurationMs += generationMs;
+    const ttft =
+      typeof row.timeToFirstTokenMs === "number" && Number.isFinite(row.timeToFirstTokenMs)
+        ? row.timeToFirstTokenMs
+        : Number.isFinite(startedAt)
+          ? firstTokenAt - startedAt
+          : null;
+    if (ttft !== null && ttft >= 0) ttftValues.push(ttft);
+    if (typeof row.durationMs === "number" && Number.isFinite(row.durationMs)) {
+      requestDurationValues.push(Math.max(0, row.durationMs));
+    }
+  }
+
+  return {
+    sampleCount,
+    outputTokens,
+    outputDurationMs,
+    tokensPerSecond: outputDurationMs > 0 ? (outputTokens * 1000) / outputDurationMs : null,
+    ttftP50Ms: modelRatePercentile(ttftValues, 50),
+    ttftP90Ms: modelRatePercentile(ttftValues, 90),
+    requestDurationP50Ms: modelRatePercentile(requestDurationValues, 50),
+    requestDurationP90Ms: modelRatePercentile(requestDurationValues, 90),
+    cacheHitRate: inputTokens > 0 ? Math.min(1, cacheReadTokens / inputTokens) : null,
   };
 }
 

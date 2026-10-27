@@ -8,6 +8,7 @@ import type {
 import type { Event, IDisposable } from "@zcode/rpc";
 import { ServiceChannels } from "@zcode/shared";
 import type { AppUsageRange, AppUsageSnapshot, ZCodeTaskTokenUsageResult } from "@zcode/shared";
+import type { V4UsageModelRateResult } from "@zcode/shared/zcode-protocol-v4";
 import type { DynamicWorkflowMode } from "@zcode/shared";
 import type { ZCodeAutomation, ZCodeAutomationRun } from "@zcode/shared";
 import type {
@@ -257,6 +258,13 @@ export interface ZCodeAgentListSessionSubagentsParams extends ZCodeAgentSessionT
 export interface ZCodeAgentAppUsageParams {
   range: AppUsageRange;
   timeZone?: string;
+}
+
+/** 模型级请求速率的窗口参数；窗口由 CLI 时钟计算，调用端只描述时长。 */
+export interface ZCodeAgentModelRequestRateParams {
+  providerId: string;
+  modelId: string;
+  windowMs: number;
 }
 
 export interface ZCodeAgentTaskTokenUsageParams extends ZCodeAgentSessionTarget {}
@@ -648,6 +656,9 @@ export interface IZCodeAgentService {
     params: ZCodeAgentListSessionSubagentsParams,
   ): Promise<ZCodeSessionSubagentsResult>;
   getAppUsageStats(params: ZCodeAgentAppUsageParams): Promise<AppUsageSnapshot>;
+  getModelRequestRate(
+    params: ZCodeAgentModelRequestRateParams,
+  ): Promise<V4UsageModelRateResult>;
   getTaskTokenUsage(params: ZCodeAgentTaskTokenUsageParams): Promise<ZCodeTaskTokenUsageResult>;
   readSession(params: ZCodeAgentReadSessionParams): Promise<ZCodeSessionStateSnapshot>;
   readSessionMessages(

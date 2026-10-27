@@ -203,9 +203,8 @@ import { ConversationTimeline } from "@/v4/ConversationTimeline.js";
 import {
   derivePerformanceHudMetrics,
   PERFORMANCE_HUD_TOGGLE_EVENT,
-  PERFORMANCE_HUD_WINDOWS,
-  type PerformanceHudWindow,
 } from "@/v4/conversationTurnWorkSegments.js";
+import { useModelRequestRate } from "@/hooks/useUsageStats.js";
 import type { ConversationLatestTurnSummary } from "@/v4/conversationTimelineLiveTail.js";
 import { ConversationShareImportNotice } from "@/v4/ConversationShareImportNotice.js";
 import { ConversationShareConfirmationDock } from "@/v4/ConversationShareConfirmationDock.js";
@@ -6043,6 +6042,19 @@ export function SessionPane({
 
 const PERFORMANCE_HUD_STORAGE_KEY = "zcode.performance-hud.v1";
 
+// 窗口统计按模型跨会话聚合，去掉“本会话”（长 agent 轮会把短窗口挤空）。
+const PERFORMANCE_HUD_WINDOWS = ["1m", "5m", "15m", "30m", "1h", "3h", "24h"] as const;
+type PerformanceHudWindow = (typeof PERFORMANCE_HUD_WINDOWS)[number];
+const PERFORMANCE_HUD_WINDOW_MS: Record<PerformanceHudWindow, number> = {
+  "1m": 60 * 1000,
+  "5m": 5 * 60 * 1000,
+  "15m": 15 * 60 * 1000,
+  "30m": 30 * 60 * 1000,
+  "1h": 60 * 60 * 1000,
+  "3h": 3 * 60 * 60 * 1000,
+  "24h": 24 * 60 * 60 * 1000,
+};
+
 const PERFORMANCE_HUD_WINDOW_LABEL_IDS = {
   "1m": "chat.performanceHud.window.1m",
   "5m": "chat.performanceHud.window.5m",
@@ -6050,7 +6062,7 @@ const PERFORMANCE_HUD_WINDOW_LABEL_IDS = {
   "30m": "chat.performanceHud.window.30m",
   "1h": "chat.performanceHud.window.1h",
   "3h": "chat.performanceHud.window.3h",
-  session: "chat.performanceHud.window.session",
+  "24h": "chat.performanceHud.window.24h",
 } as const;
 
 interface PerformanceHudPrefs {
@@ -6162,12 +6174,20 @@ function PerformanceHud({
     }
   }, [prefs]);
 
+  // 模型级窗口吞吐来自 CLI 的 model_usage（跨会话），与当前会话 projection 解耦；
+  // enabled 在浮层隐藏时停止轮询。
+  const modelRate = useModelRequestRate({
+    providerId: snapshot.config.provider,
+    modelId: snapshot.config.model,
+    windowMs: PERFORMANCE_HUD_WINDOW_MS[prefs.window],
+    enabled: prefs.visible,
+  });
+
   if (!prefs.visible) return null;
 
   const metrics = derivePerformanceHudMetrics(
     { rows: snapshot.rows.window, usage: snapshot.usage, config: snapshot.config },
     nowMs,
-    prefs.window,
   );
   const style =
     prefs.x !== undefined && prefs.y !== undefined
@@ -6199,14 +6219,14 @@ function PerformanceHud({
   const windowLabel = intl.formatMessage({
     id: PERFORMANCE_HUD_WINDOW_LABEL_IDS[prefs.window],
   });
-  const windowRateLabel = formatHudRate(metrics.windowTokensPerSecond);
+  const windowRateLabel = formatHudRate(modelRate.snapshot?.tokensPerSecond ?? null);
   const windowTurnLabel =
-    metrics.windowTurnCount > 0
+    modelRate.snapshot && modelRate.snapshot.sampleCount > 0
       ? intl.formatMessage(
           { id: "chat.performanceHud.windowSamples" },
           {
-            count: metrics.windowTurnCount,
-            tokens: formatHudCount(metrics.windowOutputTokens),
+            count: modelRate.snapshot.sampleCount,
+            tokens: formatHudCount(modelRate.snapshot.outputTokens),
           },
         )
       : intl.formatMessage({ id: "chat.performanceHud.waiting" });
@@ -6249,10 +6269,13 @@ function PerformanceHud({
     event.currentTarget.releasePointerCapture?.(event.pointerId);
   };
 
+  // E2E/诊断锚点：窗口查询的过滤键就是 provider+model，避免测试另猜有效模型。
   return (
     <div
       ref={rootRef}
       data-zcode-performance-hud="true"
+      data-zcode-perf-hud-provider={metrics.provider}
+      data-zcode-perf-hud-model={metrics.model}
       style={style}
       className="fixed z-[90] w-[300px] max-w-[calc(100vw-24px)] overflow-hidden rounded-2xl border border-border bg-card/95 text-foreground shadow-xl backdrop-blur"
     >
@@ -6347,12 +6370,18 @@ function PerformanceHud({
                 ))}
               </select>
               <div className="mt-0.5 flex items-baseline gap-1">
-                <span className="text-[26px] font-semibold leading-none tabular-nums">
+                <span
+                  className="text-[26px] font-semibold leading-none tabular-nums"
+                  data-zcode-perf-hud-window-rate={windowRateLabel}
+                >
                   {windowRateLabel}
                 </span>
                 <span className="text-ui-sm text-foreground-subtle">tok/s</span>
               </div>
-              <div className="mt-1 truncate text-[10px] text-foreground-subtle">
+              <div
+                className="mt-1 truncate text-[10px] text-foreground-subtle"
+                data-zcode-perf-hud-window-samples={windowTurnLabel}
+              >
                 {windowTurnLabel}
               </div>
             </div>
@@ -6378,33 +6407,45 @@ function PerformanceHud({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-ui-sm">
-            <div>
-              <div className="text-[10.5px] text-foreground-subtle">
-                {intl.formatMessage({ id: "chat.performanceHud.ttftP50" })}
-              </div>
-              <div className="font-medium tabular-nums">{formatHudLatency(metrics.ttftP50Ms)}</div>
+          <div>
+            <div className="mb-1 text-[10px] text-foreground-subtle">
+              {intl.formatMessage(
+                { id: "chat.performanceHud.modelScope" },
+                { window: windowLabel },
+              )}
             </div>
-            <div>
-              <div className="text-[10.5px] text-foreground-subtle">
-                {intl.formatMessage({ id: "chat.performanceHud.ttftP90" })}
+            <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-ui-sm">
+              <div>
+                <div className="text-[10.5px] text-foreground-subtle">
+                  {intl.formatMessage({ id: "chat.performanceHud.ttftP50" })}
+                </div>
+                <div className="font-medium tabular-nums">
+                  {formatHudLatency(modelRate.snapshot?.ttftP50Ms ?? null)}
+                </div>
               </div>
-              <div className="font-medium tabular-nums">{formatHudLatency(metrics.ttftP90Ms)}</div>
-            </div>
-            <div>
-              <div className="text-[10.5px] text-foreground-subtle">
-                {intl.formatMessage({ id: "chat.performanceHud.requestP50" })}
+              <div>
+                <div className="text-[10.5px] text-foreground-subtle">
+                  {intl.formatMessage({ id: "chat.performanceHud.ttftP90" })}
+                </div>
+                <div className="font-medium tabular-nums">
+                  {formatHudLatency(modelRate.snapshot?.ttftP90Ms ?? null)}
+                </div>
               </div>
-              <div className="font-medium tabular-nums">
-                {formatHudLatency(metrics.requestDurationP50Ms)}
+              <div>
+                <div className="text-[10.5px] text-foreground-subtle">
+                  {intl.formatMessage({ id: "chat.performanceHud.requestP50" })}
+                </div>
+                <div className="font-medium tabular-nums">
+                  {formatHudLatency(modelRate.snapshot?.requestDurationP50Ms ?? null)}
+                </div>
               </div>
-            </div>
-            <div>
-              <div className="text-[10.5px] text-foreground-subtle">
-                {intl.formatMessage({ id: "chat.performanceHud.requestP90" })}
-              </div>
-              <div className="font-medium tabular-nums">
-                {formatHudLatency(metrics.requestDurationP90Ms)}
+              <div>
+                <div className="text-[10.5px] text-foreground-subtle">
+                  {intl.formatMessage({ id: "chat.performanceHud.requestP90" })}
+                </div>
+                <div className="font-medium tabular-nums">
+                  {formatHudLatency(modelRate.snapshot?.requestDurationP90Ms ?? null)}
+                </div>
               </div>
             </div>
           </div>

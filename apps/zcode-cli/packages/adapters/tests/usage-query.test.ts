@@ -495,3 +495,215 @@ describe("queryRecentModelRequestTimings", () => {
     }
   });
 });
+
+describe("queryModelRequestRate", () => {
+  it("aggregates completed main-turn requests per model across sessions", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "zcode-model-rate-"));
+    const dbPath = join(tempRoot, "session.sqlite");
+    const store = await createSqliteSessionStore({ dbPath });
+    const sessionID = createSessionId("rate-a");
+    const otherSessionID = createSessionId("rate-b");
+    const turnID = createTurnId("rate-turn");
+    try {
+      for (const id of [sessionID, otherSessionID]) {
+        await store.createSession({
+          id,
+          projectID: createProjectId(`project-${id}`),
+          slug: String(id),
+          directory: tempRoot,
+          title: String(id),
+          version: "0.1.0",
+        });
+      }
+      const usage = (
+        id: string,
+        options: {
+          startedAt: number;
+          firstTokenAt?: number;
+          completedAt?: number;
+          durationMs?: number;
+          timeToFirstTokenMs?: number;
+          outputTokens?: number;
+          inputTokens?: number;
+          cacheReadInputTokens?: number;
+          querySource?: string;
+          status?: "completed" | "error";
+          modelId?: string;
+          sessionID?: typeof sessionID;
+        },
+      ) => ({
+        id,
+        logicalRequestId: `${id}-request`,
+        sessionID: options.sessionID ?? sessionID,
+        turnID,
+        querySource: options.querySource ?? "main_turn",
+        providerId: "new-provider",
+        modelId: options.modelId ?? "deepseek-v4.1-flash",
+        status: options.status ?? ("completed" as const),
+        startedAt: options.startedAt,
+        ...(options.firstTokenAt === undefined ? {} : { firstTokenAt: options.firstTokenAt }),
+        ...(options.completedAt === undefined ? {} : { completedAt: options.completedAt }),
+        ...(options.durationMs === undefined ? {} : { durationMs: options.durationMs }),
+        ...(options.timeToFirstTokenMs === undefined
+          ? {}
+          : { timeToFirstTokenMs: options.timeToFirstTokenMs }),
+        ...(options.outputTokens === undefined ? {} : { outputTokens: options.outputTokens }),
+        ...(options.inputTokens === undefined ? {} : { inputTokens: options.inputTokens }),
+        ...(options.cacheReadInputTokens === undefined
+          ? {}
+          : { cacheReadInputTokens: options.cacheReadInputTokens }),
+      });
+
+      // usage 记录会被 30 天保留策略清理，基准时间必须靠近 now（沿用文件内其他用例的固定未来时钟）。
+      const now = 1_900_000_000_000;
+
+      // 两个会话、不同起点的有效样本：4000ms/1000 tokens 与 2000ms/400 tokens。
+      await store.recordModelUsage(
+        usage("valid-a", {
+          startedAt: now,
+          firstTokenAt: now + 100,
+          completedAt: now + 4_100,
+          durationMs: 4_100,
+          timeToFirstTokenMs: 100,
+          outputTokens: 1_000,
+          inputTokens: 1_000,
+          cacheReadInputTokens: 900,
+        }),
+      );
+      await store.recordModelUsage(
+        usage("valid-b", {
+          startedAt: now + 1_000,
+          firstTokenAt: now + 1_200,
+          completedAt: now + 3_200,
+          durationMs: 2_200,
+          timeToFirstTokenMs: 200,
+          outputTokens: 400,
+          inputTokens: 500,
+          cacheReadInputTokens: 250,
+          sessionID: otherSessionID,
+        }),
+      );
+      // 生成时长 < 300ms：不参与速率/分位，但仍计入缓存命中。
+      await store.recordModelUsage(
+        usage("tiny", {
+          startedAt: now + 2_000,
+          firstTokenAt: now + 2_100,
+          completedAt: now + 2_200,
+          durationMs: 200,
+          timeToFirstTokenMs: 100,
+          outputTokens: 10,
+          inputTokens: 100,
+          cacheReadInputTokens: 50,
+        }),
+      );
+      // 无首 token：不参与速率/分位，仍计入缓存命中。
+      await store.recordModelUsage(
+        usage("no-first-token", {
+          startedAt: now + 3_000,
+          completedAt: now + 3_100,
+          durationMs: 100,
+          outputTokens: 50,
+          inputTokens: 200,
+        }),
+      );
+      // 子代理、错误、其他模型、窗口外：全部排除。
+      await store.recordModelUsage(
+        usage("subagent", {
+          startedAt: now + 4_000,
+          firstTokenAt: now + 4_100,
+          completedAt: now + 8_100,
+          durationMs: 4_000,
+          outputTokens: 1_000,
+          inputTokens: 1_000,
+          cacheReadInputTokens: 1_000,
+          querySource: "subagent",
+        }),
+      );
+      await store.recordModelUsage(
+        usage("failed", {
+          startedAt: now + 5_000,
+          firstTokenAt: now + 5_100,
+          completedAt: now + 9_100,
+          durationMs: 4_000,
+          outputTokens: 1_000,
+          inputTokens: 1_000,
+          cacheReadInputTokens: 1_000,
+          status: "error",
+        }),
+      );
+      await store.recordModelUsage(
+        usage("other-model", {
+          startedAt: now + 6_000,
+          firstTokenAt: now + 6_100,
+          completedAt: now + 10_100,
+          durationMs: 4_000,
+          outputTokens: 1_000,
+          inputTokens: 1_000,
+          cacheReadInputTokens: 1_000,
+          modelId: "other-model",
+        }),
+      );
+      await store.recordModelUsage(
+        usage("outside", {
+          startedAt: now - 1_000,
+          firstTokenAt: now - 900,
+          completedAt: now + 3_100,
+          durationMs: 4_000,
+          outputTokens: 1_000,
+          inputTokens: 1_000,
+          cacheReadInputTokens: 1_000,
+        }),
+      );
+
+      const result = await store.queryModelRequestRate({
+        since: now - 500,
+        until: now + 100_000,
+        providerId: "new-provider",
+        modelId: "deepseek-v4.1-flash",
+      });
+
+      expect(result.sampleCount).toBe(2);
+      expect(result.outputTokens).toBe(1_400);
+      expect(result.outputDurationMs).toBe(6_000);
+      expect(result.tokensPerSecond).toBeCloseTo(233.333, 3);
+      // TTFT 样本 [100, 200]；请求耗时样本 [2200, 4100]。
+      expect(result.ttftP50Ms).toBe(150);
+      expect(result.ttftP90Ms).toBe(190);
+      expect(result.requestDurationP50Ms).toBe(3_150);
+      expect(result.requestDurationP90Ms).toBe(3_910);
+      // 缓存命中包含所有窗口内的 completed main_turn 请求（含被速率过滤掉的样本）。
+      expect(result.cacheHitRate).toBeCloseTo(1_200 / 1_800, 6);
+    } finally {
+      store.close();
+      await rm(tempRoot, { force: true, recursive: true });
+    }
+  });
+
+  it("returns empty aggregates when the window has no requests", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "zcode-model-rate-empty-"));
+    const dbPath = join(tempRoot, "session.sqlite");
+    const store = await createSqliteSessionStore({ dbPath });
+    try {
+      const result = await store.queryModelRequestRate({
+        since: 1_000,
+        until: 2_000,
+        providerId: "p",
+        modelId: "m",
+      });
+      expect(result).toEqual({
+        sampleCount: 0,
+        outputTokens: 0,
+        outputDurationMs: 0,
+        tokensPerSecond: null,
+        ttftP50Ms: null,
+        ttftP90Ms: null,
+        requestDurationP50Ms: null,
+        requestDurationP90Ms: null,
+        cacheHitRate: null,
+      });
+    } finally {
+      store.close();
+      await rm(tempRoot, { force: true, recursive: true });
+    }
+  });
+});

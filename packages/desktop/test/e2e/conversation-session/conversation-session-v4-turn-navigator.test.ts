@@ -94,10 +94,11 @@ describe("v4 Conversation Turn Navigator", () => {
         45000,
       );
       const navigator = await waitForV4TurnNavigator(
-        (state) => state.visible && state.itemCount >= 4,
-        "4 个可导航 turn 后 navigator item 数量不足",
+        (state) => state.visible && state.itemCount === 3 && state.totalItemCount === 4,
+        "导航轨没有收敛到最多 3 根横条",
       );
-      expect(navigator.items).toHaveLength(4);
+      expect(navigator.items).toHaveLength(3);
+      expect(navigator.totalItemCount).toBe(4);
       expect(navigator.composerLeftGutterPx).toBeGreaterThanOrEqual(64);
       expect(navigator.firstItemLeftOffsetPx).toBeLessThanOrEqual(32);
       expect(navigator.firstItemLeftOffsetPx).toBeGreaterThanOrEqual(0);
@@ -137,23 +138,33 @@ describe("v4 Conversation Turn Navigator", () => {
         "hover/focus 后 navigator 没有形成中心到邻近条递减的山峰效果",
         15000,
       );
+      const hoveredNavigator = await getV4TurnNavigatorState();
+      const firstVisibleItemIndex = hoveredNavigator.items[0]?.itemIndex ?? 0;
       const tooltip = await waitForV4TurnNavigatorTooltip(
         (text) =>
-          text.includes("E2E_V4_TURN_NAV_1") &&
-          text.includes("TN_ASSISTANT_1_EXCERPT") &&
+          text.includes(`E2E_V4_TURN_NAV_${firstVisibleItemIndex + 1}`) &&
+          text.includes(`TN_ASSISTANT_${firstVisibleItemIndex + 1}_EXCERPT`) &&
           !text.includes(TOOL_SECRET_CONTENT),
         "query navigator tooltip 没有展示 user+assistant 摘要，或泄露了工具正文",
       );
       expect(tooltip).not.toContain(TOOL_SECRET_CONTENT);
 
       const beforeClick = await getV4TurnNavigatorState();
-      const targetUnitIndex = beforeClick.items[1]?.unitIndex;
-      expect(typeof targetUnitIndex).toBe("number");
-      await clickV4TurnNavigatorItemByIndex(1);
-      await waitForV4TimelineContaining("TN_ASSISTANT_2_EXCERPT", 15000);
+      const targetDisplayIndex = beforeClick.items.findIndex((item) => !item.active);
+      const targetItemIndex = beforeClick.items[targetDisplayIndex]?.itemIndex;
+      expect(targetDisplayIndex).toBeGreaterThanOrEqual(0);
+      if (typeof targetItemIndex !== "number") {
+        throw new Error(`navigator target item 缺少 data-item-index: ${JSON.stringify(beforeClick)}`);
+      }
+      await clickV4TurnNavigatorItemByIndex(targetDisplayIndex);
+      await waitForV4TimelineContaining(
+        `TN_ASSISTANT_${targetItemIndex + 1}_EXCERPT`,
+        15000,
+      );
       await waitForV4TurnNavigator(
-        (state) => state.items[1]?.active === true,
-        "点击第二个 navigator bar 后 active highlight 没有更新",
+        (state) =>
+          state.items.some((item) => item.active && item.itemIndex === targetItemIndex),
+        "点击 navigator bar 后 active highlight 没有更新",
         15000,
       );
       const scrolled = await getV4TimelineScrollState();
@@ -172,7 +183,10 @@ describe("v4 Conversation Turn Navigator", () => {
       await setCurrentElectronRendererContentSize(1280);
       const restoredPane = await waitForV4TurnNavigator(
         (state) =>
-          state.visible && state.itemCount === 4 && state.composerLeftGutterPx >= 64,
+          state.visible &&
+          state.itemCount === 3 &&
+          state.totalItemCount === 4 &&
+          state.composerLeftGutterPx >= 64,
         "primary pane 恢复宽度后 navigator 没有恢复",
         15000,
       );

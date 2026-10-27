@@ -40,12 +40,16 @@ import {
   v4ConversationUsageResultSchema,
   v4ConversationSubscribeResultSchema,
   v4ConversationResyncResultSchema,
+  v4UsageModelRateResultSchema,
   v4UsageStatsResultSchema,
   workspaceConfigTopic,
 } from "@zcode/shared/zcode-protocol-v4";
 import {
   SessionEventType,
+  createProjectId,
+  createSessionId,
   createTraceId,
+  createTurnId,
   type BackgroundTaskInfo,
   type MessageId,
   type MessagePart,
@@ -1212,6 +1216,70 @@ describe("ZCodeProtocolAgentServer", () => {
     expect(result.timeZone).toBe("UTC");
     expect(result.source).toBe("agent-db");
     expect(result.models).toEqual([]);
+  });
+
+  it("serves v4/usage/model-rate from persisted model_usage", async () => {
+    const store = await createSqliteSessionStore({ dbPath: ":memory:" });
+    const sessionID = createSessionId("v4-model-rate");
+    const turnID = createTurnId("v4-model-rate-turn");
+    const now = Date.now();
+    try {
+      await store.createSession({
+        id: sessionID,
+        projectID: createProjectId("v4-model-rate"),
+        slug: "v4-model-rate",
+        directory: workspace.workspacePath,
+        title: "v4-model-rate",
+        version: "test-version",
+      });
+      await store.recordModelUsage({
+        id: "v4-model-rate-1",
+        logicalRequestId: "v4-model-rate-request-1",
+        sessionID,
+        turnID,
+        querySource: "main_turn",
+        providerId: "new-provider",
+        modelId: "deepseek-v4.1-flash",
+        status: "completed",
+        startedAt: now - 2_000,
+        firstTokenAt: now - 1_900,
+        completedAt: now - 900,
+        durationMs: 1_100,
+        timeToFirstTokenMs: 100,
+        outputTokens: 500,
+        inputTokens: 1_000,
+        cacheReadInputTokens: 900,
+      });
+      const server = new ZCodeProtocolAgentServer({
+        createZCodeApp: (options) => createFakeApp(options),
+        cwd: workspace.workspacePath,
+        sessionStore: store,
+        version: "test-version",
+      });
+
+      const result = v4UsageModelRateResultSchema.parse(
+        await requestResult(server, {
+          id: 1,
+          method: V4_METHODS.usageModelRate,
+          params: {
+            providerId: "new-provider",
+            modelId: "deepseek-v4.1-flash",
+            windowMs: 60_000,
+          },
+        }),
+      );
+
+      expect(result.providerId).toBe("new-provider");
+      expect(result.modelId).toBe("deepseek-v4.1-flash");
+      expect(result.windowMs).toBe(60_000);
+      expect(result.sampleCount).toBe(1);
+      expect(result.outputTokens).toBe(500);
+      expect(result.tokensPerSecond).toBe(500);
+      expect(result.ttftP50Ms).toBe(100);
+      expect(result.cacheHitRate).toBe(0.9);
+    } finally {
+      store.close();
+    }
   });
 
   it("serves v4/conversation/usage keyed by sessionId", async () => {

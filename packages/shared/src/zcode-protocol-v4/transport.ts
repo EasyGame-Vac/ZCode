@@ -371,6 +371,9 @@ export const V4_METHODS = {
   // usage 事实源在 CLI 的 session 库（model_usage/turn_usage 聚合），host 侧无副本，
   // 故收敛为 v4 query 而非 host 直连；旧词 usage/stats、session/usage 就此消费清零。
   usageStats: "v4/usage/stats",
+  // 按 provider+model 聚合的请求级吞吐/延迟。窗口由 CLI 时钟计算，renderer 只传 windowMs，
+  // 避免拿本地时钟与协议时间戳相减（见 core.ts 时钟规则）。
+  usageModelRate: "v4/usage/model-rate",
   conversationUsage: "v4/conversation/usage",
   // 附件事务：禁止 full-data RPC。每个 chunk 的 decoded bytes <=512KiB，
   // renderer->host Channel 与 host->CLI NDJSON 都必须逐 request 证明 <=1MiB。
@@ -801,6 +804,38 @@ export const v4UsageStatsParamsSchema = z
 export type V4UsageStatsParams = z.infer<typeof v4UsageStatsParamsSchema>;
 export const v4UsageStatsResultSchema = appUsageSnapshotSchema;
 export type V4UsageStatsResult = z.infer<typeof v4UsageStatsResultSchema>;
+
+// 模型级请求速率：窗口成员是窗口内**已完成**的 main_turn 请求，按 provider+model 跨会话聚合。
+// windowMs 上限 24h，保证单次查询有界；锚点由 CLI 时钟给出，renderer 不回传本地时间戳。
+export const MODEL_REQUEST_RATE_MAX_WINDOW_MS = 24 * 60 * 60 * 1000;
+export const v4UsageModelRateParamsSchema = z
+  .object({
+    providerId: z.string().min(1),
+    modelId: z.string().min(1),
+    windowMs: z.number().int().positive().max(MODEL_REQUEST_RATE_MAX_WINDOW_MS),
+  })
+  .strict();
+export type V4UsageModelRateParams = z.infer<typeof v4UsageModelRateParamsSchema>;
+export const v4UsageModelRateResultSchema = z
+  .object({
+    providerId: z.string().min(1),
+    modelId: z.string().min(1),
+    windowMs: z.number().int().positive(),
+    windowStart: z.number().int().nonnegative(),
+    windowEnd: z.number().int().nonnegative(),
+    // 参与加权速率与百分位的请求数；错误/取消/过短样本不计。
+    sampleCount: z.number().int().nonnegative(),
+    outputTokens: z.number().int().nonnegative(),
+    outputDurationMs: z.number().int().nonnegative(),
+    tokensPerSecond: z.number().nonnegative().nullable(),
+    ttftP50Ms: z.number().nonnegative().nullable(),
+    ttftP90Ms: z.number().nonnegative().nullable(),
+    requestDurationP50Ms: z.number().nonnegative().nullable(),
+    requestDurationP90Ms: z.number().nonnegative().nullable(),
+    cacheHitRate: z.number().min(0).max(1).nullable(),
+  })
+  .strict();
+export type V4UsageModelRateResult = z.infer<typeof v4UsageModelRateResultSchema>;
 
 // 会话级 token 用量（旧 session/usage 的 v4 名字空间落位：会话是协议一等概念，
 // task 是 UI 投影概念不进协议词表）。字段与旧 result 同形，旧 schema 随词一起死。

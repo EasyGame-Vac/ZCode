@@ -104,7 +104,7 @@ ZCODE_ENV=production ZCODE_PREVIEW_IDENTITY=1 \
 
 ## 排查
 
-- **HUD 全是 `—`**：先确认当前会话是否有已完成的模型请求。Duet 的 K 会话通常没有，HUD 为空是正常的；切到有历史的任务再观察。
+- **HUD 窗口数字全是 `—`**：窗口吞吐按 `provider+model` 从 CLI 的 `model_usage` 跨会话聚合，只统计窗口内**已完成**的 `main_turn` 请求；子代理、错误、取消和生成时长 <300ms 的请求不算。当前模型最近没有任何完成请求时为空是正常的。顶部实时值、上下文和缓存仍来自当前会话；Duet 的 K 会话没有模型请求时，这些会话事实为空也正常。若窗口数字一直为空且最近有请求，确认 CLI 已重建（见下一行）——旧 host 没有 `v4/usage/model-rate`。
 - **快捷方式没反应**：检查 `5174` / `47821` 是否已监听；已有实例时用 `/status`，不要重复启动。
 - **桌面快捷方式丢失或失效**：重建一个指向仓库根 `dev-zcode.cmd` 的快捷方式（工作目录设为仓库根），名称沿用 `ZCode Dev (源码)`；不要指向 `electron.exe`、安装包或临时 `.vbs`。
 - **CLI 改动没生效**：确认执行过 `node scripts/build-desktop-agent-cli.mjs`，并且 `/restart` 的是 `target: "w"`。

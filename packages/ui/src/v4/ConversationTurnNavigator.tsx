@@ -1,5 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { memo, useEffect, useMemo, useState } from "react";
 import {
   TID_V4_TURN_NAVIGATOR,
   TID_V4_TURN_NAVIGATOR_ITEM,
@@ -17,6 +16,7 @@ import {
   buildConversationTurnNavigatorItems,
   resolveConversationTurnNavigatorActiveUnitIndex,
   resolveConversationTurnNavigatorBarVisualState,
+  resolveConversationTurnNavigatorVisibleRange,
   resolveConversationTurnNavigatorVisualFocusItemIndex,
   type ConversationTurnNavigatorVirtualItem,
 } from "@/v4/conversationTurnNavigatorHelpers.js";
@@ -115,34 +115,24 @@ function ConversationTurnNavigatorImpl({
     activeItemIndex,
     interactionItemIndex,
   });
-  const railScrollRef = useRef<HTMLDivElement>(null);
-  const getRailScrollElement = useCallback(() => railScrollRef.current, []);
-  const getRailItemKey = useCallback(
-    (index: number) => items[index]?.key ?? index,
-    [items],
+  // 产品规则：导航轨最多同时显示 3 根横条；以当前 query 为中心取连续窗口，
+  // 靠近目录两端时回补到 3 条，避免 rail 随会话历史无限增长。
+  const visibleRange = useMemo(
+    () =>
+      resolveConversationTurnNavigatorVisibleRange({
+        itemCount: items.length,
+        activeItemIndex,
+      }),
+    [activeItemIndex, items.length],
   );
-  const railVirtualizer = useVirtualizer({
-    count: items.length,
-    estimateSize: () => 10,
-    getItemKey: getRailItemKey,
-    getScrollElement: getRailScrollElement,
-    overscan: 6,
-  });
-  const virtualRows = railVirtualizer.getVirtualItems();
-
+  const visibleItems = useMemo(
+    () => items.slice(visibleRange.start, visibleRange.end),
+    [items, visibleRange.end, visibleRange.start],
+  );
+  // 可见窗口平移后旧 hover 项可能已卸载，避免把 stale 原始索引继续用于山峰计算。
   useEffect(() => {
-    if (activeItemIndex < 0 || items.length < 2) return;
-    railVirtualizer.scrollToIndex(activeItemIndex, { align: "auto" });
-    const element = railScrollRef.current;
-    if (!element) return;
-    window.queueMicrotask(() => {
-      if (railScrollRef.current !== element) return;
-      // 目录从 tail 一次扩展到上千项时，scrollToIndex 与 virtualizer 的
-      // measurement 更新处于同一个 commit，Chromium 可能合并 scroll 通知。补发通知
-      // 只同步 rail observer，确保活动项对应的可视窗口立即挂载。
-      element.dispatchEvent(new Event("scroll"));
-    });
-  }, [activeItemIndex, items.length, railVirtualizer]);
+    setInteractionItemIndex(undefined);
+  }, [visibleRange.start]);
 
   if (items.length < 2) {
     return null;
@@ -154,25 +144,20 @@ function ConversationTurnNavigatorImpl({
       aria-busy={isHydratingDirectory}
       data-testid={TID_V4_TURN_NAVIGATOR}
       data-item-count={items.length}
-      data-rendered-item-count={virtualRows.length}
+      data-visible-item-count={visibleItems.length}
+      data-visible-start-index={visibleRange.start}
+      data-rendered-item-count={visibleItems.length}
       className="pointer-events-none invisible absolute inset-y-0 left-0 z-10 w-12 -translate-x-2 opacity-0 transition-[opacity,transform,visibility] duration-150 ease-out motion-reduce:transition-none @min-[864px]/conversation:visible @min-[864px]/conversation:translate-x-0 @min-[864px]/conversation:opacity-100"
     >
       <div
-        ref={railScrollRef}
         // 只声明 overflow-y-auto 时，浏览器会把 overflow-x 计算为 auto；
         // hover 山峰横向放大后便可能触发横向滚动条，因此 rail 必须只开放纵向滚动。
         className="!scrollbar-hide pointer-events-auto absolute left-3 top-1/2 max-h-[calc(100%-6rem)] w-9 -translate-y-1/2 overflow-x-hidden overflow-y-auto py-1"
         onPointerLeave={() => setInteractionItemIndex(undefined)}
-        onScroll={() => setInteractionItemIndex(undefined)}
       >
-        <div
-          className="relative w-9"
-          style={{ height: `${railVirtualizer.getTotalSize()}px` }}
-        >
-          {virtualRows.map((virtualRow) => {
-            const itemIndex = virtualRow.index;
-            const item = items[itemIndex];
-            if (!item) return null;
+        <div className="relative w-9" style={{ height: `${visibleItems.length * 10}px` }}>
+          {visibleItems.map((item, displayIndex) => {
+            const itemIndex = visibleRange.start + displayIndex;
             const active = itemIndex === activeItemIndex;
             const visualState = resolveConversationTurnNavigatorBarVisualState({
               itemIndex,
@@ -184,7 +169,7 @@ function ConversationTurnNavigatorImpl({
               <div
                 key={item.key}
                 className="absolute left-0 top-0 h-2.5 w-9"
-                style={{ transform: `translateY(${virtualRow.start}px)` }}
+                style={{ transform: `translateY(${displayIndex * 10}px)` }}
               >
                 <HoverCard closeDelay={80} openDelay={120}>
                   <HoverCardTrigger asChild>

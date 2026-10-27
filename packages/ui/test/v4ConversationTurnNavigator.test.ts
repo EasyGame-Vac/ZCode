@@ -13,6 +13,7 @@ import {
   resolveConversationTurnNavigatorActiveQueryRowId,
   resolveConversationTurnNavigatorActiveUnitIndex,
   resolveConversationTurnNavigatorHydrationRetryDelayMs,
+  resolveConversationTurnNavigatorVisibleRange,
   shouldHydrateConversationTurnNavigatorDirectory,
 } from "@/v4/conversationTurnNavigatorHelpers.js";
 
@@ -292,5 +293,35 @@ describe("conversation turn navigator helpers", () => {
         viewportHeightPx: 120,
       }),
     ).toBe(12);
+  });
+
+  it("TN10：导航轨最多同时渲染 3 条，当前 query 优先居中并在两端回补", () => {
+    expect(resolveConversationTurnNavigatorVisibleRange({ itemCount: 0 })).toEqual({
+      start: 0,
+      end: 0,
+    });
+    expect(resolveConversationTurnNavigatorVisibleRange({ itemCount: 2 })).toEqual({
+      start: 0,
+      end: 2,
+    });
+    expect(
+      resolveConversationTurnNavigatorVisibleRange({ itemCount: 9, activeItemIndex: 4 }),
+    ).toEqual({ start: 3, end: 6 });
+    expect(
+      resolveConversationTurnNavigatorVisibleRange({ itemCount: 9, activeItemIndex: 0 }),
+    ).toEqual({ start: 0, end: 3 });
+    expect(
+      resolveConversationTurnNavigatorVisibleRange({ itemCount: 9, activeItemIndex: 8 }),
+    ).toEqual({ start: 6, end: 9 });
+    expect(
+      resolveConversationTurnNavigatorVisibleRange({ itemCount: 9, activeItemIndex: undefined }),
+    ).toEqual({ start: 6, end: 9 });
+    expect(
+      resolveConversationTurnNavigatorVisibleRange({
+        itemCount: 12,
+        activeItemIndex: 5,
+        maxVisibleItems: 5,
+      }),
+    ).toEqual({ start: 3, end: 8 });
   });
 });

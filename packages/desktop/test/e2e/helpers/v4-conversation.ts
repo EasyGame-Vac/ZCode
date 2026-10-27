@@ -1785,10 +1785,12 @@ export interface V4TurnNavigatorState {
   firstItemLeftOffsetPx: number;
   visible: boolean;
   itemCount: number;
+  totalItemCount: number;
   paneWidthPx: number;
   items: Array<{
     active: boolean;
     height: number;
+    itemIndex: number | null;
     left: number;
     testId: string;
     top: number;
@@ -1820,6 +1822,10 @@ export function getV4TurnNavigatorState(): Promise<V4TurnNavigatorState> {
         return {
           active: el.getAttribute("data-active") === "true",
           height: itemRect.height,
+          itemIndex:
+            el.getAttribute("data-item-index") === null
+              ? null
+              : Number(el.getAttribute("data-item-index")),
           left: itemRect.left,
           testId: el.dataset.testid ?? "",
           top: itemRect.top,
@@ -1859,6 +1865,9 @@ export function getV4TurnNavigatorState(): Promise<V4TurnNavigatorState> {
           rect.height > 0,
         ),
         itemCount: items.length,
+        totalItemCount: navigator
+          ? Number(navigator.getAttribute("data-item-count") ?? Number.NaN)
+          : 0,
         items,
         paneWidthPx: paneRect?.width ?? Number.NaN,
       };

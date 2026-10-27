@@ -41,6 +41,7 @@ import {
   generateWorkspaceText,
   goalSession,
   getTaskTokenUsage,
+  getModelRequestRate,
   getUsageStats,
   listSessions,
   listSessionSubagents,
@@ -648,6 +649,8 @@ export class ZCodeProtocolAgentServer {
       // 也不经旧 op 分派（无桥）。旧 case 保留到旧词删除（老 host 版本兼容）。──
       case V4_METHODS.usageStats:
         return await getUsageStats(this.context, request.params);
+      case V4_METHODS.usageModelRate:
+        return await getModelRequestRate(this.context, request.params);
       case V4_METHODS.conversationUsage:
         return await getTaskTokenUsage(this.context, request.params);
       case V4_METHODS.command:

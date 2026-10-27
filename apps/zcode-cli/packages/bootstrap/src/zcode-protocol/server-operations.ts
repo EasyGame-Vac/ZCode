@@ -94,6 +94,7 @@ import {
   type ZCodeWorkspaceRef,
   type ZCodeStateUpdatedNotification,
 } from "@zcode/shared";
+import { v4UsageModelRateParamsSchema } from "@zcode/shared/zcode-protocol-v4";
 import {
   buildSessionSnapshot,
   buildWorkspaceRef,
@@ -1909,6 +1910,52 @@ export async function getUsageStats(context: ZCodeProtocolAgentServerContext, ra
 
   const result = await usageStore.queryAppUsage({ since, until, tzOffsetMs });
   return buildAppUsageSnapshot(result, buildOptions);
+}
+
+/**
+ * 模型级请求速率：窗口边界由 CLI 时钟给出，renderer 只传 windowMs。
+ * 归属是 provider+model，跨会话读取同一份 model_usage；无 usage store 时返回空样本，
+ * 让 HUD 显示 “—”，而不是抛错或回退到按会话整轮统计。
+ */
+export async function getModelRequestRate(
+  context: ZCodeProtocolAgentServerContext,
+  rawParams: unknown,
+) {
+  const params = parseParams(v4UsageModelRateParamsSchema, rawParams ?? {});
+  const until = Date.now();
+  const since = until - params.windowMs;
+  const emptyResult = {
+    providerId: params.providerId,
+    modelId: params.modelId,
+    windowMs: params.windowMs,
+    windowStart: since,
+    windowEnd: until,
+    sampleCount: 0,
+    outputTokens: 0,
+    outputDurationMs: 0,
+    tokensPerSecond: null,
+    ttftP50Ms: null,
+    ttftP90Ms: null,
+    requestDurationP50Ms: null,
+    requestDurationP90Ms: null,
+    cacheHitRate: null,
+  };
+  const usageStore = context.deps.sessionStore as Partial<UsageStorePort> | undefined;
+  if (!usageStore?.queryModelRequestRate) return emptyResult;
+  const result = await usageStore.queryModelRequestRate({
+    since,
+    until,
+    providerId: params.providerId,
+    modelId: params.modelId,
+  });
+  return {
+    providerId: params.providerId,
+    modelId: params.modelId,
+    windowMs: params.windowMs,
+    windowStart: since,
+    windowEnd: until,
+    ...result,
+  };
 }
 
 export async function readSession(context: ZCodeProtocolAgentServerContext, rawParams: unknown) {

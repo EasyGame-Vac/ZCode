@@ -343,3 +343,43 @@ export function resolveConversationTurnNavigatorVisualFocusItemIndex({
 }: ResolveConversationTurnNavigatorVisualFocusItemIndexOptions): number | undefined {
   return interactionItemIndex;
 }
+
+export interface ConversationTurnNavigatorVisibleRange {
+  start: number;
+  end: number;
+}
+
+export interface ResolveConversationTurnNavigatorVisibleRangeOptions {
+  itemCount: number;
+  activeItemIndex?: number;
+  maxVisibleItems?: number;
+}
+
+export const CONVERSATION_TURN_NAVIGATOR_MAX_VISIBLE_ITEMS = 3;
+
+/**
+ * 导航轨最多同时渲染 maxVisibleItems 根横条。当前 query 优先居中；靠近目录两端时
+ * 从另一侧回补，保证窗口始终连续且长度固定（不足 maxVisibleItems 时返回全部）。
+ * activeItemIndex 缺失或越界时取最近一条 query。
+ */
+export function resolveConversationTurnNavigatorVisibleRange({
+  itemCount,
+  activeItemIndex,
+  maxVisibleItems = CONVERSATION_TURN_NAVIGATOR_MAX_VISIBLE_ITEMS,
+}: ResolveConversationTurnNavigatorVisibleRangeOptions): ConversationTurnNavigatorVisibleRange {
+  const total = Math.max(0, Math.floor(itemCount));
+  const maxVisible = Math.max(1, Math.floor(maxVisibleItems));
+  if (total <= maxVisible) {
+    return { start: 0, end: total };
+  }
+  const normalizedActive =
+    activeItemIndex !== undefined &&
+    Number.isSafeInteger(activeItemIndex) &&
+    activeItemIndex >= 0 &&
+    activeItemIndex < total
+      ? activeItemIndex
+      : total - 1;
+  const leadingItems = Math.floor((maxVisible - 1) / 2);
+  const start = Math.min(Math.max(0, normalizedActive - leadingItems), total - maxVisible);
+  return { start, end: start + maxVisible };
+}

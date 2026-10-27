@@ -16,6 +16,10 @@ import type {
   UsageStatsRequest,
   UsageStatsSnapshot,
 } from "@zcode/shared";
+import type {
+  V4UsageModelRateParams,
+  V4UsageModelRateResult,
+} from "@zcode/shared/zcode-protocol-v4";
 import { isCodingPlanModelProviderId } from "@zcode/shared";
 import type { ICredentialService } from "../credential/credential.js";
 import type { IAccountRequestAuthService } from "../model-provider/accountRequestAuthService.js";
@@ -39,8 +43,9 @@ interface UsageStatsServiceDependencies {
   ) => Promise<UsageApiAuthorization | null>;
   credentialService?: Pick<ICredentialService, "load">;
   env?: NodeJS.ProcessEnv;
-  /** App Usage 经 ZCode Protocol 读取 agent 数据库真实统计。 */
-  zcodeAgentService: Pick<IZCodeAgentService, "getAppUsageStats">;
+  /** App Usage 与模型速率经 ZCode Protocol 读取 agent 数据库真实统计。 */
+  zcodeAgentService: Pick<IZCodeAgentService, "getAppUsageStats"> &
+    Partial<Pick<IZCodeAgentService, "getModelRequestRate">>;
   /**
    * 官方 Server MCP 额度的凭证来源（与 server MCP 调用同一套 5 个身份头）。
    * 缺省时 entitlement 快照不含 MCP 额度。
@@ -90,6 +95,21 @@ export function createUsageStatsService(
       return dependencies.zcodeAgentService.getAppUsageStats({
         range: request.range,
         timeZone: request.timeZone,
+      });
+    },
+    async getModelRequestRate(
+      request: V4UsageModelRateParams,
+    ): Promise<V4UsageModelRateResult> {
+      // 模型速率是跨会话事实，直接交给 agent 侧读 model_usage；host 不持有副本。
+      const getModelRequestRate = dependencies.zcodeAgentService.getModelRequestRate;
+      if (!getModelRequestRate) {
+        // 旧 host / 远程 Host 没有该能力：与 IUsageStatsService 的可选方法语义一致。
+        throw new Error("model_request_rate_unsupported");
+      }
+      return getModelRequestRate.call(dependencies.zcodeAgentService, {
+        providerId: request.providerId,
+        modelId: request.modelId,
+        windowMs: request.windowMs,
       });
     },
     async getCodingPlanUsageSnapshot(
