@@ -181,6 +181,10 @@ export function spawnHostProcess(
         runningTaskCount: number;
       },
     ) => void;
+    onRunningAgentTaskCountChanged?: (
+      child: ElectronUtilityProcess,
+      event: { runningTaskCount: number },
+    ) => void;
     onAgentProcessExited?: (event: HostAgentProcessExitedResponse) => void;
     onAgentProcessError?: (event: HostAgentProcessErrorResponse) => void;
     onAgentProcessException?: (event: HostAgentProcessExceptionResponse) => void;
@@ -583,6 +587,9 @@ export function spawnHostProcess(
       dependencies.logger.info(
         `[app-quit] host running agent sessions updated (${label}) count=${result.data.runningTaskCount}`,
       );
+      dependencies.onRunningAgentTaskCountChanged?.(child, {
+        runningTaskCount: result.data.runningTaskCount,
+      });
       return;
     }
 
@@ -651,6 +658,7 @@ export function spawnHostProcess(
     hostLogRelay.flushRawLogs();
     dependencies.logger.info(`[spawnHostProcess] host process (${label}) exited with code ${code}`);
     dependencies.hostRunningTaskCountMap.delete(child);
+    dependencies.onRunningAgentTaskCountChanged?.(child, { runningTaskCount: 0 });
     if (shouldRegisterBroadcast) {
       dependencies.broadcastHub.unregister(windowId);
     }

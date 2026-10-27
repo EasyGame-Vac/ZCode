@@ -49,6 +49,7 @@ import {
 import { randomUUID } from "node:crypto";
 import type { UtilityProcess as ElectronUtilityProcess } from "electron";
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir, hostname } from "node:os";
 import {
@@ -1297,6 +1298,91 @@ function getRunningAgentSessionCount() {
   return [...hostRunningTaskCountMap.values()].reduce((total, count) => total + count, 0);
 }
 
+// Dev-only duet lease bridge. The supervisor sets these env vars for target W;
+// production launches never set ZCODE_DUET_TARGET and this stays inert.
+const duetLeaseConfig = (() => {
+  if (process.env.ZCODE_DUET_TARGET !== "w") return null;
+  const url = process.env.ZCODE_DUET_SUPERVISOR_URL?.trim();
+  const tokenPath = process.env.ZCODE_DUET_TOKEN_PATH?.trim();
+  if (!url || !tokenPath) return null;
+  return { url: url.replace(/\/+$/, ""), tokenPath: resolve(tokenPath) };
+})();
+
+let duetLeaseBusy = false;
+let duetLeaseId: string | null = null;
+let duetLeaseTimer: NodeJS.Timeout | null = null;
+let duetLeaseToken = "";
+let duetLeaseWarned = false;
+
+function readDuetLeaseToken(): string {
+  if (duetLeaseToken) return duetLeaseToken;
+  if (!duetLeaseConfig) return "";
+  try {
+    duetLeaseToken = readFileSync(duetLeaseConfig.tokenPath, "utf8").trim();
+  } catch {
+    duetLeaseToken = "";
+  }
+  return duetLeaseToken;
+}
+
+async function postDuetLease(path: string, body: Record<string, unknown>): Promise<void> {
+  if (!duetLeaseConfig) return;
+  const token = readDuetLeaseToken();
+  if (!token) return;
+  const response = await fetch(`${duetLeaseConfig.url}${path}`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!response.ok) {
+    throw new Error(`duet ${path} ${response.status}`);
+  }
+  duetLeaseWarned = false;
+}
+
+function ensureDuetLease(): void {
+  if (!duetLeaseConfig || !duetLeaseBusy) return;
+  if (!duetLeaseId) duetLeaseId = `w-${process.pid}-${Date.now()}`;
+  void postDuetLease("/lease", {
+    target: "w",
+    leaseId: duetLeaseId,
+    holder: "desktop",
+    reason: "desktop running task",
+    ttlMs: 60_000,
+  }).catch((error) => {
+    if (duetLeaseWarned) return;
+    duetLeaseWarned = true;
+    logger.warn("[duet] target lease heartbeat failed:", error);
+  });
+}
+
+function updateDuetLease(busy: boolean): void {
+  if (!duetLeaseConfig) return;
+  if (busy === duetLeaseBusy) return;
+  duetLeaseBusy = busy;
+
+  if (busy) {
+    ensureDuetLease();
+    duetLeaseTimer = setInterval(ensureDuetLease, 20_000);
+    duetLeaseTimer.unref?.();
+    return;
+  }
+
+  if (duetLeaseTimer) {
+    clearInterval(duetLeaseTimer);
+    duetLeaseTimer = null;
+  }
+  const leaseId = duetLeaseId;
+  duetLeaseId = null;
+  if (leaseId) {
+    void postDuetLease("/release", { target: "w", leaseId, holder: "desktop" }).catch(() => {});
+  }
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, Math.max(ms, 0));
@@ -1897,6 +1983,9 @@ function createWindowInstance(startupBootstrap: StartupWindowBootstrap = {}) {
           taskRealtimeBus,
           windowHostProcessMap,
           hostRunningTaskCountMap,
+          onRunningAgentTaskCountChanged: () => {
+            updateDuetLease(getRunningAgentSessionCount() > 0);
+          },
           onCuaOperationStateChanged: (source, event) =>
             windowsCuaOperationIndicator.handleState(source, event),
           onCuaOperationStateSourceExited: (source) =>
@@ -2609,6 +2698,8 @@ app.on("before-quit", (event) => {
     explicitQuitRef.current = false;
     return;
   }
+
+  updateDuetLease(false);
 
   if (!hasPreparedAppQuit) {
     localMediaPreviewPathRegistry.clear();

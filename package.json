@@ -2,6 +2,7 @@
   "name": "zcode",
   "version": "3.16.2",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "dev:web": "concurrently -k -n server,web -c blue,green \"pnpm --filter @zcode/server dev\" \"pnpm --filter @zcode/web dev\"",
@@ -35,6 +36,13 @@
     "test:unit": "vitest run --exclude \"packages/desktop/test/e2e/**/*.test.ts\"",
     "test:unit:affected": "node scripts/run-affected-unit-tests.mjs",
     "test:docker:web-app-gateway": "node scripts/test-web-app-gateway-reset.mjs",
+    "test:duet": "node --test scripts/duet/tests/protected-paths.test.mjs scripts/duet/tests/leases.test.mjs scripts/duet/tests/verify.test.mjs scripts/duet/tests/supervisor.test.mjs scripts/duet/tests/pet.test.mjs",
+    "duet": "node scripts/duet/supervisor.mjs",
+    "duet:start": "node scripts/duet/supervisor.mjs",
+    "duet:pet": "node scripts/duet/pet/start.mjs",
+    "duet:pet:smoke": "node scripts/duet/pet/start.mjs --smoke",
+    "duet:all": "node scripts/duet/supervisor.mjs",
+    "duet:verify": "node scripts/duet/verify.mjs",
     "verify:pre-push": "pnpm run lint && pnpm run db:schema:check && pnpm run test:architecture && pnpm run architecture:check -- --changed && pnpm run test:unit:affected --scope push",
     "build": "pnpm -r build",
     "build:desktop-agent:bytecode": "node scripts/build-desktop-agent-bytecode.mjs",
@@ -128,6 +136,5 @@
       "@ai-sdk/openai-compatible@2.0.60": "patches/@ai-sdk__openai-compatible@2.0.60.patch",
       "@ai-sdk/anthropic@3.0.81": "patches/@ai-sdk__anthropic@3.0.81.patch"
     }
-  },
-  "license": "Apache-2.0"
+  }
 }

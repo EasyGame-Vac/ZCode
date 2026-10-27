@@ -1,0 +1,95 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 47821
+  },
+  "stateDir": ".duet",
+  "targets": {
+    "w": {
+      "cwd": ".",
+      "command": "pnpm",
+      "args": ["--filter", "@zcode/desktop", "dev:runtime"],
+      "autoStart": true,
+      "ready": {
+        "type": "delay",
+        "ms": 20000,
+        "stabilityMs": 2000
+      },
+      "stopTimeoutMs": 12000,
+      "env": { "ZCODE_DUET_TARGET": "w" }
+    },
+    "k": {
+      "cwd": ".",
+      "command": "node",
+      "args": ["scripts/duet/pet/start.mjs"],
+      "autoStart": true,
+      "ready": {
+        "type": "marker",
+        "pattern": "\\[duet-pet\\] READY",
+        "timeoutMs": 30000,
+        "stabilityMs": 1000
+      },
+      "stopTimeoutMs": 8000,
+      "env": { "ZCODE_DUET_TARGET": "k" }
+    }
+  },
+  "verify": {
+    "protectedPathsFile": "protected-paths.json",
+    "defaultProfile": "fast",
+    "profiles": {
+      "fast": [
+        {
+          "id": "typecheck",
+          "command": "pnpm",
+          "args": ["typecheck"],
+          "timeoutMs": 900000
+        }
+      ],
+      "full": [
+        {
+          "id": "typecheck",
+          "command": "pnpm",
+          "args": ["typecheck"],
+          "timeoutMs": 900000
+        },
+        {
+          "id": "lint",
+          "command": "pnpm",
+          "args": ["lint"],
+          "timeoutMs": 600000
+        },
+        {
+          "id": "architecture",
+          "command": "pnpm",
+          "args": ["architecture:check", "--changed"],
+          "timeoutMs": 300000
+        }
+      ]
+    },
+    "testStep": {
+      "id": "tests",
+      "command": "pnpm",
+      "args": ["exec", "vitest", "run"],
+      "timeoutMs": 900000
+    }
+  },
+  "pet": {
+    "brain": {
+      "preferBuilt": false,
+      "builtCliPath": "apps/zcode-cli/packages/cli/dist/zcode.cjs",
+      "tsxCliPath": "node_modules/tsx/dist/cli.mjs",
+      "cliCwd": "apps/zcode-cli/packages/cli",
+      "cliEntry": "src/main.ts",
+      "cliMode": "yolo",
+      "maxPromptChars": 8000
+    },
+    "window": {
+      "width": 360,
+      "height": 520,
+      "collapsedWidth": 180,
+      "collapsedHeight": 220
+    },
+    "pollIntervalMs": 4000,
+    "shortcut": "CommandOrControl+Shift+Z"
+  }
+}

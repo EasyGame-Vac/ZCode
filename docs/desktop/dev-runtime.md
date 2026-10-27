@@ -1,5 +1,7 @@
 # Desktop 开发运行时目录
 
+> Windows 个人 fork 的日常源码启动入口见 [local-dev-launch.md](local-dev-launch.md)；本文只描述 macOS 开发副本目录。
+
 ## 规则与所有者
 
 - macOS 开发启动脚本 `packages/desktop/scripts/dev.mjs` 指定仓库根目录下的

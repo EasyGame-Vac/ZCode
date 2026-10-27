@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Source artwork for the inline mascot in renderer/index.html.
+     The window uses the inline copy so CSS can animate eyes, antenna and gear. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="240" height="240">
+  <defs>
+    <linearGradient id="body-gradient" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#8b7cff" />
+      <stop offset="100%" stop-color="#4dd4c6" />
+    </linearGradient>
+    <radialGradient id="glow-gradient" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#8b7cff" stop-opacity="0.45" />
+      <stop offset="100%" stop-color="#8b7cff" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+  <ellipse cx="60" cy="108" rx="30" ry="6" fill="rgba(0,0,0,0.28)" />
+  <circle cx="60" cy="62" r="52" fill="url(#glow-gradient)" />
+  <g>
+    <rect x="26" y="32" width="68" height="62" rx="28" fill="url(#body-gradient)" />
+    <circle cx="48" cy="58" r="5.5" fill="#16141f" />
+    <circle cx="72" cy="58" r="5.5" fill="#16141f" />
+    <path d="M52 74 Q60 80 68 74" fill="none" stroke="#16141f" stroke-width="3" stroke-linecap="round" />
+    <line x1="60" y1="32" x2="60" y2="18" stroke="rgba(255,255,255,0.85)" stroke-width="2.5" stroke-linecap="round" />
+    <circle cx="60" cy="16" r="5" fill="#fff6b0" />
+    <circle
+      cx="60"
+      cy="71"
+      r="7"
+      fill="none"
+      stroke="rgba(255,255,255,0.85)"
+      stroke-width="2"
+      stroke-dasharray="4 3"
+    />
+  </g>
+</svg>

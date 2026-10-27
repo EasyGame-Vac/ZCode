@@ -1,0 +1,23 @@
+{
+  "blockAny": [
+    "scripts/duet/**",
+    "specs/duet-self-iteration.md",
+    ".github/**",
+    "architecture-policy.yaml",
+    "**/pnpm-lock.yaml",
+    "**/package.json",
+    "**/tsconfig*.json",
+    "**/.oxlintrc.json",
+    "**/vitest.config.ts",
+    "packages/desktop/src/main/autoUpdater.ts",
+    "packages/shared/src/version.ts"
+  ],
+  "blockModifyOrDelete": [
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "**/*.test.mjs",
+    "**/*.spec.ts",
+    "**/*.spec.tsx"
+  ],
+  "allowExtensionPrefixes": [".agents/skills/duet-"]
+}

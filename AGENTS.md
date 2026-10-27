@@ -16,7 +16,7 @@
 | 类型检查         | `pnpm typecheck`                                     |
 | Lint             | `pnpm lint` / `pnpm lint:fix`                        |
 | 格式检查         | `pnpm fmt:check`                                     |
-| 桌面开发         | `pnpm dev:desktop`                                   |
+| 桌面开发（底层） | `pnpm dev:desktop`（日常入口见下方）                  |
 | Web 开发         | `pnpm dev:web`                                       |
 | 提交前检查       | `pnpm verify:pre-push`（Lint、架构检查与受影响单测） |
 | 架构检查         | `pnpm architecture:check --changed`                  |
@@ -36,6 +36,12 @@ affected 使用 Vitest 官方选择，只运行选中的根 UT；选中整个套
 - `apps/zcode-cli`：Agent CLI 与运行时。
 - `CONTEXT.md`：插件商店领域词汇；修改相关 UI 前阅读。
 - `DESIGN.md`：UI 设计规范；修改 UI 前阅读。
+
+## 本地启动（个人 fork）
+
+日常唯一入口是仓库根 `dev-zcode.cmd`（桌面快捷方式 `ZCode Dev (源码)`），内部执行 `corepack pnpm duet:start`，由 Duet supervisor 管理源码窗口、Vite 和 pet。`pnpm dev:desktop` 只是底层 dev 入口，不要和 Duet 栈同时启动。
+
+不要新建 `.vbs` / `.cmd` / 快捷方式、独立数据目录或独立 launcher；不要把已安装的 `ZCode Preview` 当作日常入口，安装包只在用户明确要求验证打包时使用；`5174` / `47821` 已监听时不要启动第二个实例。修改源码后的生效方式、supervisor 重启命令和数据目录边界见 [本地启动流程](docs/desktop/local-dev-launch.md)。
 
 ## 实现与验证
 
