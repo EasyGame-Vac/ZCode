@@ -4,14 +4,17 @@ const api = window.duetPet;
 const app = document.querySelector("#app");
 const statusText = document.querySelector("#status-text");
 const messagesEl = document.querySelector("#messages");
+const activityBar = document.querySelector("#activity-bar");
+const activityToggle = document.querySelector("#activity-toggle");
+const activitySummary = document.querySelector("#activity-summary");
 const activityEl = document.querySelector("#activity");
 const previewEl = document.querySelector("#preview");
+const previewToggle = document.querySelector("#preview-toggle");
 const previewTitle = document.querySelector("#preview-title");
 const previewFiles = document.querySelector("#preview-files");
 const previewWarning = document.querySelector("#preview-warning");
 const actionsEl = document.querySelector("#actions");
 const activateButton = document.querySelector("#activate-button");
-const rollbackButton = document.querySelector("#rollback-button");
 const logButton = document.querySelector("#log-button");
 const composer = document.querySelector("#composer");
 const input = document.querySelector("#input");
@@ -20,6 +23,10 @@ const stopButton = document.querySelector("#stop-button");
 const resetButton = document.querySelector("#reset-button");
 const hideButton = document.querySelector("#hide-button");
 const mascot = document.querySelector("#mascot");
+const petStack = document.querySelector("#pet-stack");
+const collapsedStatus = document.querySelector("#collapsed-status");
+const collapsedStatusText = document.querySelector("#collapsed-status-text");
+const modelSelect = document.querySelector("#model-select");
 
 let state = createInitialPetState();
 let collapsed = false;
@@ -28,6 +35,11 @@ let renderScheduled = false;
 let lastSupervisorError = "";
 let supervisorOnline = false;
 let sending = false;
+let currentModel = "";
+let modelsLoading = false;
+let dragState = null;
+let activityExpanded = false;
+let previewExpanded = false;
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
@@ -129,6 +141,11 @@ function renderMessages() {
 
 function renderActivity() {
   const items = state.activity.slice(-8);
+  activityBar.hidden = items.length === 0;
+  activityBar.classList.toggle("expanded", activityExpanded);
+  activityToggle.setAttribute("aria-expanded", String(activityExpanded));
+  activitySummary.textContent = items.length > 0 ? truncate(items.at(-1).text, 60) : "工具活动";
+
   activityEl.replaceChildren();
   for (const item of items) {
     const element = document.createElement("div");
@@ -137,7 +154,7 @@ function renderActivity() {
     element.title = item.text;
     activityEl.append(element);
   }
-  activityEl.scrollTop = activityEl.scrollHeight;
+  if (activityExpanded) activityEl.scrollTop = activityEl.scrollHeight;
 }
 
 function renderPreview() {
@@ -148,10 +165,16 @@ function renderPreview() {
   }
 
   previewEl.hidden = false;
-  previewTitle.textContent = `改动 ${shortSha(preview.base)} → ${shortSha(preview.commit)}`;
-  previewFiles.replaceChildren();
+  previewEl.classList.toggle("expanded", previewExpanded);
+  previewToggle.setAttribute("aria-expanded", String(previewExpanded));
 
   const changes = Array.isArray(preview.changes) ? preview.changes : [];
+  previewTitle.textContent =
+    changes.length > 0
+      ? `改动 ${changes.length} 个文件 · ${shortSha(preview.base)} → ${shortSha(preview.commit)}`
+      : "没有检测到已提交的改动";
+  previewFiles.replaceChildren();
+
   if (changes.length === 0) {
     const empty = document.createElement("div");
     empty.className = "preview-empty";
@@ -223,20 +246,20 @@ function renderActions() {
   );
 
   activateButton.hidden = !canActivate;
-  rollbackButton.hidden = !state.supervisor;
-  actionsEl.hidden = !(canActivate || state.supervisor);
-
+  actionsEl.hidden = !canActivate;
   activateButton.disabled = !canActivate;
-  rollbackButton.disabled = isLocked() || !state.supervisor || windowBusy;
   resetButton.disabled = state.busy;
   stopButton.hidden = !state.busy;
   sendButton.disabled = isLocked();
+  modelSelect.disabled = isLocked() || modelsLoading;
 }
 
 function render() {
+  const label = statusLabel();
   app.dataset.state = state.mode;
   document.body.dataset.petMode = state.mode;
-  statusText.textContent = statusLabel();
+  statusText.textContent = label;
+  collapsedStatusText.textContent = truncate(label, 18);
   renderMessages();
   renderActivity();
   renderPreview();
@@ -292,6 +315,7 @@ function handleBrainEvent(event) {
 
 function handleTaskComplete(payload) {
   if (payload?.preview) {
+    previewExpanded = false;
     dispatch({ type: "preview", preview: payload.preview });
     if (payload.preview.dirty) {
       dispatch({
@@ -334,6 +358,12 @@ function handleSupervisorError(payload) {
   dispatch({ type: "activity", text: `宿管：${message}` });
 }
 
+function applyModelValue(model) {
+  currentModel = typeof model === "string" ? model : "";
+  modelSelect.value = currentModel;
+  modelSelect.title = currentModel || "默认模型";
+}
+
 function handleEvent(envelope) {
   if (!envelope || typeof envelope.type !== "string") return;
   const payload = envelope.payload;
@@ -364,8 +394,13 @@ function handleEvent(envelope) {
     case "supervisor-error":
       handleSupervisorError(payload);
       break;
+    case "model-changed":
+      applyModelValue(payload?.model);
+      break;
     case "session-reset":
       dispatch({ type: "reset" });
+      activityExpanded = false;
+      previewExpanded = false;
       greeted = false;
       supervisorOnline = Boolean(state.supervisor);
       ensureGreeting();
@@ -379,12 +414,19 @@ function handleEvent(envelope) {
   }
 }
 
+function resizeInput() {
+  input.style.height = "auto";
+  input.style.height = `${Math.min(input.scrollHeight, 92)}px`;
+}
+
 async function submit() {
   const text = input.value.trim();
   if (!text || isLocked()) return;
 
   sending = true;
   input.value = "";
+  resizeInput();
+  previewExpanded = false;
   dispatch({ type: "user-message", text });
   try {
     await api.sendMessage(text);
@@ -425,37 +467,6 @@ async function activate() {
   }
 }
 
-async function rollback() {
-  if (isLocked() || !state.supervisor) return;
-  if (state.supervisor?.targets?.w?.busy?.active) {
-    dispatch({
-      type: "assistant-message",
-      text: "窗口版正在执行任务，等它完成或先停止任务后再回滚。",
-    });
-    return;
-  }
-  if (!window.confirm("把窗口版回滚到上一个可用版本？")) return;
-
-  dispatch({ type: "activation-requested" });
-  try {
-    const result = await api.supervisor("rollback", { reason: "pet-ui" });
-    if (result?.ok === false) {
-      if (result.status === 409) {
-        dispatch({
-          type: "assistant-message",
-          text: "窗口版或小人还在执行任务，等任务结束或先取消后再试。",
-        });
-      } else {
-        dispatch({ type: "assistant-error", text: result.error ?? "回滚失败" });
-      }
-      return;
-    }
-    dispatch({ type: "assistant-message", text: "已请求回滚，正在重启窗口版。" });
-  } catch (error) {
-    dispatch({ type: "assistant-error", text: errorMessage(error) });
-  }
-}
-
 async function openLog() {
   try {
     const result = await api.openLog();
@@ -483,9 +494,81 @@ async function stopBrain() {
   }
 }
 
+function modelValue(option) {
+  const providerId = option?.ref?.providerId;
+  const modelId = option?.ref?.modelId;
+  return providerId && modelId ? `${providerId}/${modelId}` : "";
+}
+
+function modelLabel(option) {
+  return option?.label || option?.ref?.modelId || modelValue(option);
+}
+
+async function loadModels() {
+  if (!api.models) return;
+  modelsLoading = true;
+  modelSelect.replaceChildren(new Option("模型加载中…", ""));
+  modelSelect.disabled = true;
+  scheduleRender();
+  try {
+    const result = await api.models();
+    if (!result?.ok) throw new Error(result?.error ?? "模型列表不可用");
+    const options = [new Option("默认模型", "")];
+    const known = new Set();
+    for (const model of result.models ?? []) {
+      const value = modelValue(model);
+      if (!value || known.has(value)) continue;
+      known.add(value);
+      const option = new Option(modelLabel(model), value);
+      const detail = [model.providerLabel, value, model.disabledReason]
+        .filter((part) => typeof part === "string" && part.length > 0)
+        .join(" · ");
+      option.title = detail;
+      option.disabled = Boolean(model.disabledReason);
+      options.push(option);
+    }
+    if (currentModel && !known.has(currentModel)) {
+      options.push(new Option(`${currentModel}（当前）`, currentModel));
+    }
+    modelSelect.replaceChildren(...options);
+    applyModelValue(currentModel);
+  } catch (error) {
+    const fallback = [new Option("默认模型", "")];
+    if (currentModel) fallback.push(new Option(`${currentModel}（当前）`, currentModel));
+    modelSelect.replaceChildren(...fallback);
+    applyModelValue(currentModel);
+    dispatch({ type: "activity", text: `模型列表：${errorMessage(error)}` });
+  } finally {
+    modelsLoading = false;
+    scheduleRender();
+  }
+}
+
+async function changeModel() {
+  const next = modelSelect.value;
+  if (next === currentModel) return;
+  modelSelect.disabled = true;
+  try {
+    const result = await api.setModel(next);
+    applyModelValue(result?.model);
+    dispatch({ type: "activity", text: `模型：${currentModel || "默认"}` });
+  } catch (error) {
+    modelSelect.value = currentModel;
+    dispatch({ type: "activity", text: `切换模型失败：${errorMessage(error)}` });
+  } finally {
+    scheduleRender();
+  }
+}
+
 function applyCollapsedClass() {
   app.classList.toggle("collapsed", collapsed);
   mascot.setAttribute("aria-label", collapsed ? "展开对话" : "收起对话");
+  if (collapsed) {
+    input.blur();
+    modelSelect.blur();
+  } else {
+    resizeInput();
+  }
 }
 
 async function setCollapsed(next) {
@@ -498,16 +581,72 @@ async function setCollapsed(next) {
   }
 }
 
+function finishPetDrag(pointerId, cancelled) {
+  if (!dragState || dragState.pointerId !== pointerId) return;
+  const { moved, dragging } = dragState;
+  dragState = null;
+  app.classList.remove("dragging");
+  if (dragging) api.dragEnd();
+  try {
+    petStack.releasePointerCapture(pointerId);
+  } catch {
+    // Pointer capture may already be gone.
+  }
+  if (!cancelled && !dragging && moved < 4) void setCollapsed(false);
+}
+
+function bindPetDrag() {
+  petStack.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || event.isPrimary === false) return;
+    dragState = {
+      pointerId: event.pointerId,
+      startX: event.screenX,
+      startY: event.screenY,
+      moved: 0,
+      dragging: false,
+    };
+    petStack.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  });
+  petStack.addEventListener("pointermove", (event) => {
+    if (!dragState || event.pointerId !== dragState.pointerId) return;
+    const distance = Math.hypot(event.screenX - dragState.startX, event.screenY - dragState.startY);
+    dragState.moved = Math.max(dragState.moved, distance);
+    // 先等用户真的移动再开始拖，纯点击不会因为光标抖动让窗口漂移。
+    if (!dragState.dragging && dragState.moved > 3) {
+      dragState.dragging = true;
+      app.classList.add("dragging");
+      api.dragStart();
+    }
+  });
+  petStack.addEventListener("pointerup", (event) => {
+    finishPetDrag(event.pointerId, false);
+  });
+  petStack.addEventListener("pointercancel", (event) => {
+    finishPetDrag(event.pointerId, true);
+  });
+  window.addEventListener("blur", () => {
+    if (!dragState) return;
+    const pointerId = dragState.pointerId;
+    finishPetDrag(pointerId, true);
+  });
+  // 键盘触发的 click 没有 pointer 过程，单独保留展开入口。
+  mascot.addEventListener("click", (event) => {
+    if (event.detail === 0) void setCollapsed(false);
+  });
+  collapsedStatus.addEventListener("click", (event) => {
+    if (event.detail === 0) void setCollapsed(false);
+  });
+}
+
 function renderFallback(message) {
   app.dataset.state = "error";
   statusText.textContent = "界面加载失败";
+  collapsedStatusText.textContent = "界面加载失败";
   messagesEl.textContent = message;
 }
 
 function bindUi() {
-  mascot.addEventListener("click", () => {
-    void setCollapsed(!collapsed);
-  });
   hideButton.addEventListener("click", () => {
     void setCollapsed(true);
   });
@@ -524,6 +663,7 @@ function bindUi() {
       void setCollapsed(true);
     }
   });
+  input.addEventListener("input", resizeInput);
   input.addEventListener("focus", scheduleRender);
   input.addEventListener("blur", scheduleRender);
   window.addEventListener("keydown", (event) => {
@@ -535,9 +675,6 @@ function bindUi() {
   activateButton.addEventListener("click", () => {
     void activate();
   });
-  rollbackButton.addEventListener("click", () => {
-    void rollback();
-  });
   logButton.addEventListener("click", () => {
     void openLog();
   });
@@ -547,6 +684,18 @@ function bindUi() {
   stopButton.addEventListener("click", () => {
     void stopBrain();
   });
+  modelSelect.addEventListener("change", () => {
+    void changeModel();
+  });
+  activityToggle.addEventListener("click", () => {
+    activityExpanded = !activityExpanded;
+    scheduleRender();
+  });
+  previewToggle.addEventListener("click", () => {
+    previewExpanded = !previewExpanded;
+    scheduleRender();
+  });
+  bindPetDrag();
 }
 
 async function boot() {
@@ -563,6 +712,7 @@ async function boot() {
     const info = await api.init();
     collapsed = Boolean(info?.collapsed);
     applyCollapsedClass();
+    applyModelValue(info?.model);
     supervisorOnline = Boolean(info?.status);
     dispatch({
       type: "init",
@@ -576,6 +726,8 @@ async function boot() {
   }
 
   render();
+  resizeInput();
+  void loadModels();
 }
 
 document.body.dataset.petReady = "1";

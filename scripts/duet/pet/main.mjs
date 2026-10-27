@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
@@ -15,8 +14,13 @@ import {
   Tray,
 } from "electron";
 import { stopProcessTree } from "../lib/process.mjs";
+import { resolveBrainCommand } from "./lib/brain-command.mjs";
 import { createEventStream } from "./lib/event-parser.mjs";
+import { createModelCatalog } from "./lib/model-catalog.mjs";
+import { createSupervisorActions } from "./lib/supervisor-actions.mjs";
 import { createSupervisorClient } from "./lib/supervisor-client.mjs";
+import { createWindowDrag } from "./lib/window-drag.mjs";
+import { createWindowShape } from "./lib/window-shape.mjs";
 
 const REPO_ROOT = resolve(import.meta.dirname, "../../..");
 const CONFIG_PATH = join(REPO_ROOT, "scripts", "duet", "config.json");
@@ -24,7 +28,8 @@ const STATE_DIR = join(REPO_ROOT, ".duet");
 const PET_STATE_PATH = join(STATE_DIR, "pet-state.json");
 const SESSION_PATH = join(STATE_DIR, "pet-session.json");
 const TOKEN_PATH = join(STATE_DIR, "token");
-const LOG_PATH = join(STATE_DIR, "logs", "w.log");
+// 精灵 UI 的“日志”按钮指向精灵自己的日志；窗口日志由 supervisor 的 /status 暴露。
+const LOG_PATH = join(STATE_DIR, "logs", "k.log");
 const IS_SMOKE = process.env.DUET_PET_SMOKE === "1";
 const K_INSTRUCTION =
   "你是 K，ZCode 的桌面小人。先阅读 scripts/duet/k-prompt.md，并严格遵守其中的约束。";
@@ -48,7 +53,7 @@ let windowSizes = {
   collapsedHeight: 220,
 };
 let supervisor = null;
-let petState = { bounds: null, collapsed: false };
+let petState = { bounds: null, collapsed: false, model: null };
 
 function log(...args) {
   console.log("[duet-pet]", ...args);
@@ -122,7 +127,24 @@ function initialBounds() {
     [saved.x, saved.y, saved.width, saved.height].every((value) => Number.isFinite(value)) &&
     intersectsAnyDisplay(saved)
   ) {
-    return { ...saved, width: sizes.width, height: sizes.height };
+    // 尺寸随折叠状态变化时固定右下角，避免展开/收起后精灵在屏幕上“跳一下”。
+    // 贴边时留 24px，避免窗口和任务栏/屏幕边缘黏在一起。
+    const area = screen.getDisplayMatching(saved).workArea;
+    const margin = 24;
+    const x = saved.x + saved.width - sizes.width;
+    const y = saved.y + saved.height - sizes.height;
+    return {
+      width: sizes.width,
+      height: sizes.height,
+      x: Math.min(
+        Math.max(x, area.x + margin),
+        Math.max(area.x + margin, area.x + area.width - sizes.width - margin),
+      ),
+      y: Math.min(
+        Math.max(y, area.y + margin),
+        Math.max(area.y + margin, area.y + area.height - sizes.height - margin),
+      ),
+    };
   }
 
   const area = screen.getPrimaryDisplay().workArea;
@@ -143,7 +165,7 @@ function enforceTopmost() {
 async function savePetState() {
   if (!win || win.isDestroyed()) return;
   const bounds = win.getBounds();
-  petState = { bounds, collapsed };
+  petState = { bounds, collapsed, model: petState.model ?? null };
   try {
     await mkdir(STATE_DIR, { recursive: true });
     await writeFile(PET_STATE_PATH, `${JSON.stringify(petState, null, 2)}\n`, "utf8");
@@ -159,16 +181,36 @@ function scheduleSave() {
   }, 300);
 }
 
+const windowDrag = createWindowDrag({
+  getWindow: () => win,
+  screen,
+  onEnd: scheduleSave,
+});
+
+const applyWindowShape = createWindowShape({
+  getWindow: () => win,
+  isCollapsed: () => collapsed,
+  onError: (error) => warn("window shape failed:", error),
+});
+
 function setCollapsed(nextCollapsed) {
   collapsed = Boolean(nextCollapsed);
+  if (collapsed) windowDrag.stop();
   if (!win || win.isDestroyed()) return;
   const sizes = currentSizes();
   const bounds = win.getBounds();
   const x = bounds.x + bounds.width - sizes.width;
   const y = bounds.y + bounds.height - sizes.height;
   win.setBounds({ x, y, width: sizes.width, height: sizes.height });
+  applyWindowShape();
   sendEvent("collapsed", { collapsed });
   scheduleSave();
+}
+
+function showWindow() {
+  if (!win || win.isDestroyed()) return;
+  win.showInactive();
+  enforceTopmost();
 }
 
 function toggleWindow() {
@@ -177,8 +219,13 @@ function toggleWindow() {
     win.hide();
     return;
   }
-  win.showInactive();
-  enforceTopmost();
+  showWindow();
+}
+
+function formatShortcutLabel(shortcut) {
+  return String(shortcut)
+    .replaceAll("CommandOrControl", process.platform === "darwin" ? "Cmd" : "Ctrl")
+    .replaceAll("+", " + ");
 }
 
 function createWindow() {
@@ -191,6 +238,10 @@ function createWindow() {
     resizable: false,
     show: false,
     skipTaskbar: true,
+    // 只设 backgroundColor 的 alpha 不够：Windows 仍会按不透明表面绘制，
+    // 收起态就会露出整块窗口底色。必须显式开启 transparent。
+    transparent: true,
+    thickFrame: false,
     type: process.platform === "darwin" ? "panel" : undefined,
     webPreferences: {
       contextIsolation: true,
@@ -203,6 +254,7 @@ function createWindow() {
 
   win.setMenuBarVisibility(false);
   win.setAlwaysOnTop(true, "floating");
+  applyWindowShape();
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   const pageLoaded = new Promise((resolveLoaded) => {
     win.webContents.once("did-finish-load", resolveLoaded);
@@ -223,15 +275,35 @@ function createWindow() {
       try {
         await pageLoaded;
         const result = await win.webContents.executeJavaScript(
-          `({
-            ready: document.body?.dataset?.petReady === "1",
-            mascot: Boolean(document.querySelector("#mascot")),
-            messages: Boolean(document.querySelector("#messages")),
-            api: Boolean(window.duetPet),
-            state: document.body?.dataset?.petMode ?? null
-          })`,
+          `(async () => {
+            const deadline = Date.now() + 15000;
+            while (Date.now() < deadline) {
+              const current = document.querySelector("#model-select");
+              if (current && current.options.length > 1) break;
+              await new Promise((resolve) => setTimeout(resolve, 250));
+            }
+            const select = document.querySelector("#model-select");
+            return {
+              ready: document.body?.dataset?.petReady === "1",
+              mascot: Boolean(document.querySelector("#mascot")),
+              messages: Boolean(document.querySelector("#messages")),
+              api: Boolean(window.duetPet),
+              state: document.body?.dataset?.petMode ?? null,
+              collapsed: document.querySelector("#app")?.classList.contains("collapsed") ?? false,
+              modelOptions: select ? select.options.length : 0,
+              modelValue: select ? select.value : null,
+              rollback: Boolean(document.querySelector("#rollback-button"))
+            };
+          })()`,
         );
-        if (!result.ready || !result.mascot || !result.messages || !result.api) {
+        if (
+          !result.ready ||
+          !result.mascot ||
+          !result.messages ||
+          !result.api ||
+          result.rollback ||
+          result.modelOptions < 2
+        ) {
           console.error(`[duet-pet] PET_SMOKE_FAIL ${JSON.stringify(result)}`);
           app.exit(1);
           return;
@@ -246,6 +318,11 @@ function createWindow() {
           JSON.stringify({
             ...result,
             bounds: win.getBounds(),
+            displays: screen.getAllDisplays().map((display) => ({
+              bounds: display.bounds,
+              workArea: display.workArea,
+              scaleFactor: display.scaleFactor,
+            })),
             alwaysOnTop: win.isAlwaysOnTop(),
             screenshot: screenshotPath,
           }),
@@ -265,7 +342,10 @@ function createWindow() {
 
   win.on("show", enforceTopmost);
   win.on("moved", scheduleSave);
-  win.on("resized", scheduleSave);
+  win.on("resized", () => {
+    applyWindowShape();
+    scheduleSave();
+  });
   win.on("close", (event) => {
     if (isQuitting) return;
     event.preventDefault();
@@ -287,20 +367,27 @@ function createTray() {
   const iconPath = join(REPO_ROOT, "public", "icon_512@2x.png");
   try {
     const image = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
+    const shortcutLabel = formatShortcutLabel(petConfig.shortcut ?? "CommandOrControl+Shift+Z");
     tray = new Tray(image);
-    tray.setToolTip("ZCode 小人");
+    tray.setToolTip(`ZCode 小人（单击显示/隐藏，${shortcutLabel}）`);
     tray.setContextMenu(
       Menu.buildFromTemplate([
-        { label: "显示 / 隐藏", click: toggleWindow },
+        { label: `显示精灵（${shortcutLabel}）`, click: showWindow },
         {
-          label: "重置会话",
+          label: "隐藏精灵",
           click: () => {
-            void clearSession();
+            win?.hide();
           },
         },
         { type: "separator" },
         {
-          label: "退出",
+          label: "新会话",
+          click: () => {
+            void clearSession();
+          },
+        },
+        {
+          label: "退出精灵",
           click: () => {
             isQuitting = true;
             app.quit();
@@ -327,27 +414,29 @@ function registerShortcut() {
   }
 }
 
-function resolveBrainCommand() {
-  const brain = petConfig.brain ?? {};
-  const preferBuilt = brain.preferBuilt === true;
-  const builtPath = brain.builtCliPath ? resolve(REPO_ROOT, brain.builtCliPath) : null;
+const brainCommand = () =>
+  resolveBrainCommand({ repoRoot: REPO_ROOT, brain: petConfig.brain ?? {} });
 
-  if (preferBuilt && builtPath && existsSync(builtPath)) {
-    return { command: "node", args: [builtPath], cwd: REPO_ROOT };
+const modelCatalog = createModelCatalog({ resolveCommand: brainCommand });
+
+async function setModel(model) {
+  const next = typeof model === "string" ? model.trim() : "";
+  if (next.length > 0) {
+    // 列表可用时先校验；列表不可用不阻塞保存，brain 启动时 CLI 仍会做最终校验。
+    const list = await modelCatalog.listModels().catch(() => null);
+    if (list) {
+      const option = list.models.find(
+        (candidate) => `${candidate?.ref?.providerId}/${candidate?.ref?.modelId}` === next,
+      );
+      if (!option) throw new Error(`模型不可用：${next}`);
+      if (option.disabledReason) throw new Error(`模型不可用：${option.disabledReason}`);
+    }
   }
 
-  const tsxPath = resolve(REPO_ROOT, brain.tsxCliPath ?? "node_modules/tsx/dist/cli.mjs");
-  const cliCwd = resolve(REPO_ROOT, brain.cliCwd ?? "apps/zcode-cli/packages/cli");
-  const cliEntry = brain.cliEntry ?? "src/main.ts";
-
-  if (!existsSync(tsxPath)) {
-    throw new Error(`找不到 tsx：${tsxPath}。先在仓库根目录运行 pnpm install。`);
-  }
-  if (!existsSync(join(cliCwd, cliEntry))) {
-    throw new Error(`找不到 CLI 入口：${join(cliCwd, cliEntry)}`);
-  }
-
-  return { command: "node", args: [tsxPath, cliEntry], cwd: cliCwd };
+  petState = { ...petState, model: next || null };
+  await savePetState();
+  sendEvent("model-changed", { model: petState.model });
+  return { ok: true, model: petState.model };
 }
 
 async function finishTask(result) {
@@ -429,7 +518,7 @@ async function sendMessage(text) {
   try {
     const sessionId = await loadSessionId();
     const prompt = sessionId ? trimmed : `${K_INSTRUCTION}\n\n任务：${trimmed}`;
-    const base = resolveBrainCommand();
+    const base = brainCommand();
     const args = [
       ...base.args,
       "-p",
@@ -442,6 +531,7 @@ async function sendMessage(text) {
       petConfig.brain?.cliMode ?? "yolo",
       "--no-color",
     ];
+    if (petState.model) args.push("--model", petState.model);
     if (sessionId) args.push("--resume", sessionId);
 
     lease = await acquireBrainLease("brain turn");
@@ -490,8 +580,13 @@ async function sendMessage(text) {
         sendEvent("brain-cancelled", {});
         return;
       }
+      const exitCode = code ?? (signal ? 1 : 0);
+      if (exitCode !== 0) {
+        // 把 brain 的失败尾部落到 k.log，UI 的“日志”按钮才有可排查的内容。
+        warn("brain failed", `code=${exitCode}`, tail(stderr, 12));
+      }
       sendEvent("brain-exit", {
-        code: code ?? (signal ? 1 : 0),
+        code: exitCode,
         signal,
         stderrTail: tail(stderr, 40),
       });
@@ -501,6 +596,7 @@ async function sendMessage(text) {
     child.once("error", (error) => {
       if (brain === current) brain = null;
       releaseBrainLease(current.lease);
+      warn("brain spawn failed", error.message);
       sendEvent("brain-exit", { code: 1, signal: null, stderrTail: error.message });
     });
 
@@ -530,61 +626,7 @@ async function clearSession() {
   sendEvent("session-reset", {});
 }
 
-function sanitizeSupervisorPayload(action, payload) {
-  const source = payload && typeof payload === "object" ? payload : {};
-  if (action === "preview") {
-    return {
-      target: "w",
-      commit: typeof source.commit === "string" ? source.commit.slice(0, 128) : undefined,
-      base: typeof source.base === "string" ? source.base.slice(0, 128) : undefined,
-    };
-  }
-  if (action === "activate") {
-    return {
-      target: "w",
-      actor: "pet",
-      profile: typeof source.profile === "string" ? source.profile.slice(0, 32) : "fast",
-      commit: typeof source.commit === "string" ? source.commit.slice(0, 128) : undefined,
-      tests: Array.isArray(source.tests)
-        ? source.tests
-            .filter((value) => typeof value === "string")
-            .map((value) => value.slice(0, 200))
-            .slice(0, 20)
-        : undefined,
-    };
-  }
-  if (action === "rollback") {
-    return {
-      target: "w",
-      actor: "pet",
-      reason: typeof source.reason === "string" ? source.reason.slice(0, 200) : "pet",
-    };
-  }
-  if (action === "ledger") {
-    return { limit: Number.isFinite(source.limit) ? Math.min(Math.max(source.limit, 1), 200) : 20 };
-  }
-  if (action === "restart") return { target: "w" };
-  return {};
-}
-
-async function handleSupervisorAction(action, payload) {
-  switch (action) {
-    case "status":
-      return supervisor.getStatus();
-    case "preview":
-      return supervisor.preview(sanitizeSupervisorPayload("preview", payload));
-    case "activate":
-      return supervisor.activate(sanitizeSupervisorPayload("activate", payload));
-    case "rollback":
-      return supervisor.rollback(sanitizeSupervisorPayload("rollback", payload));
-    case "restart":
-      return supervisor.restart(sanitizeSupervisorPayload("restart", payload));
-    case "ledger":
-      return supervisor.getLedger(sanitizeSupervisorPayload("ledger", payload).limit);
-    default:
-      throw new Error(`未知的宿管动作：${action}`);
-  }
-}
+const supervisorActions = createSupervisorActions({ getSupervisor: () => supervisor });
 
 async function pollSupervisor() {
   try {
@@ -611,11 +653,28 @@ function registerIpc() {
         window: windowSizes,
       },
       sessionId: await loadSessionId(),
+      model: petState.model ?? null,
       status,
       smoke: IS_SMOKE,
     };
   });
 
+  ipcMain.handle("pet:models", async () => {
+    try {
+      const list = await modelCatalog.listModels();
+      return { ok: true, ...list };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        models: [],
+        current: null,
+      };
+    }
+  });
+  ipcMain.handle("pet:set-model", async (_event, model) => setModel(model));
+  ipcMain.on("pet:drag-start", () => windowDrag.start());
+  ipcMain.on("pet:drag-end", () => windowDrag.stop());
   ipcMain.handle("pet:send", async (_event, text) => sendMessage(text));
   ipcMain.handle("pet:cancel", async () => cancelBrain());
   ipcMain.handle("pet:reset-session", async () => {
@@ -625,7 +684,7 @@ function registerIpc() {
   ipcMain.handle("pet:supervisor", async (_event, input) => {
     const action = typeof input?.action === "string" ? input.action : "";
     try {
-      return await handleSupervisorAction(action, input?.payload);
+      return await supervisorActions.handle(action, input?.payload);
     } catch (error) {
       return {
         ok: false,
@@ -652,7 +711,9 @@ async function bootstrap() {
   config = await loadJson(CONFIG_PATH, {});
   petConfig = config.pet ?? {};
   windowSizes = { ...windowSizes, ...petConfig.window };
-  petState = await loadJson(PET_STATE_PATH, { bounds: null, collapsed: false });
+  petState = await loadJson(PET_STATE_PATH, { bounds: null, collapsed: false, model: null });
+  petState.model =
+    typeof petState.model === "string" && petState.model.trim() ? petState.model : null;
   collapsed = petState?.collapsed === true;
 
   const host =
@@ -709,6 +770,7 @@ if (!hasLock) {
     isQuitting = true;
     clearInterval(pollTimer);
     pollTimer = null;
+    windowDrag.stop();
     globalShortcut.unregisterAll();
     tray?.destroy();
     tray = null;

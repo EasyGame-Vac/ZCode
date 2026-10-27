@@ -47,6 +47,8 @@ pnpm duet:start
 
 > 先读 `scripts/duet/k-prompt.md`，然后把设置页的“检查更新”按钮改成显示上次检查时间。
 
+精灵的模型在输入框右侧的模型选择器里切换，列表来自 CLI provider registry（`zcode models --json`）；“默认”跟随 CLI 当前默认模型。选择保存在 `.duet/pet-state.json`，下一条消息通过 `--model` 传给 brain。
+
 精灵会：
 
 1. 改代码；
@@ -108,7 +110,7 @@ pnpm duet:start
 - 窗口的桌面主进程在 Host 有 running task 时持有 `w` 租约；精灵在启动 brain 时持有 `k` 租约。两端每 20 秒续约，TTL 60 秒。
 - 有租约的 target 会被 `/activate`、`/restart`、`/stop`、`/rollback` 拒绝（409）。`/activate` 不接受 `force`；其它入口可以显式 `force:true` 做紧急操作。
 - 中枢停止 target 时会清掉该 target 的所有租约；进程崩溃留下的租约靠 TTL 过期。
-- 精灵看到窗口忙会显示“窗口正在执行任务”，并禁用验证/回滚按钮。
+- 精灵看到窗口忙会显示“窗口正在执行任务”，并禁用验证按钮。
 
 中枢启动时把门禁文件的 SHA-256 写入 `.duet/gate-hashes.json`。激活前再比一次；文件被改就拒绝。重启中枢时如果门禁变了，必须显式加：
 
@@ -118,8 +120,8 @@ node scripts/duet/supervisor.mjs --accept-gate-change
 
 ## 回滚
 
-- 自动：新窗口在 ready 窗口内退出或超时，中枢会 `git checkout --detach <lastGoodCommit>`，重启窗口，并写 ledger。
-- 手动：精灵上点“回滚”，或：
+- 自动：新窗口在 ready 窗口内退出或超时，中枢会 `git checkout --detach <lastGoodCommit>`，重启窗口，并写 ledger。这是日常唯一的回滚路径。
+- 手动：精灵 UI 不再提供“回滚”按钮；保留中枢 API 供明确的人工操作：
 
 ```bash
 TOKEN="$(cat .duet/token)"
@@ -230,6 +232,12 @@ curl -X POST http://127.0.0.1:47821/restart \
 **改坏精灵后精灵不出现**
 窗口还在。读 `.duet/logs/k.log`，修 `scripts/duet/pet/**`，再调 `/restart {"target":"k"}`。
 
+**模型选择器显示“模型列表不可用”**
+
+- 在仓库根跑 `zcode models --json`（或 `pnpm --dir apps/zcode-cli/packages/cli dev models --json`）确认 CLI 本身能读到 provider registry。
+- 模型列表只在精灵启动时加载一次；改过 provider 配置后重启精灵（`POST /restart {"target":"k"}`）。
+- 列表里的 `disabledReason` 会作为不可选项显示；账号未授权或模型被禁用时先修 provider 配置。
+
 **精灵没有返回**
 
 - 先在终端跑一次 `zcode` 确认登录和模型可用。
@@ -246,6 +254,12 @@ Linux GNOME 可能没有 StatusNotifier host；Windows/macOS 的托盘也有平�
 **门禁哈希变了**
 如果你确实改过 `scripts/duet/**` 或 `config.json`，先审查 diff，再用 `--accept-gate-change` 启动。
 
+注意：`scripts/duet/pet/**` 也在当前门禁哈希范围内，所以精灵自身的改动会让正在运行的中枢拒绝下一次窗口激活。审阅 diff 后重启中枢（会同时重启窗口和精灵）：
+
+```bash
+node scripts/duet/supervisor.mjs --accept-gate-change
+```
+
 ## 手动验收清单
 
 先跑一次窗口冒烟：
@@ -259,19 +273,21 @@ pnpm duet:pet:smoke
 当前自动化测试覆盖中枢和精灵逻辑；GUI 需要人工确认：
 
 1. 运行 `pnpm duet:start`（或 `dev-zcode.cmd`），中枢自动拉起窗口和精灵；精灵出现在屏幕右下角。
-2. 拖动顶部小横条，位置能保存。
-3. 点精灵展开/收起，窗口尺寸切换正常。
-4. 输入一句话，看到“思考中 / 正在处理”状态和活动流。
-5. 精灵完成后显示改动摘要和“验证并重启”。
-6. 点验证：窗口会先关闭，看到“验证：typecheck / 重启窗口”进度；验证期间窗口不可操作。
-7. 窗口重启后精灵显示“已更新”，且精灵没有被一起杀掉。
-8. 让精灵改一个受保护文件，点验证，看到拒绝原因，窗口保持运行。
-9. 点回滚，窗口回到上一个版本。
-10. `Cmd/Ctrl+Shift+Z` 能召唤/隐藏精灵。
-11. 让窗口改精灵的 skill/prompt 或 pet 核心，提交后调 `/restart {"target":"k"}`，精灵重启。
-12. 窗口重启期间，精灵仍能显示状态并继续操作。
-13. 在窗口跑一个长任务时，精灵禁用“验证/回滚”，直接调 `/activate` 返回 409。
-14. 在精灵跑任务时调 `/restart {"target":"k"}` 返回 409；停止任务后可以正常重启。
+2. 展开时从面板空白处、收起时从精灵本身拖动，位置都能保存；收起状态拖动后仍能单击展开。
+3. 点精灵展开、点面板右上角收起；展开只显示对话面板，收起只显示精灵和一行状态，窗口没有多余空白。
+4. 展开后点模型选择器，能看到 `zcode models` 返回的模型；选一个后发消息，重启精灵后选择仍保留。
+5. 右键“ZCode 小人”托盘图标，能看到“显示精灵 / 隐藏精灵 / 新会话 / 退出精灵”；隐藏后单击托盘图标或按 `Ctrl+Shift+Z` 能重新显示。
+6. 输入一句话，输入框保持单行，多行输入时自动长高到上限；对话进行中“停止”按钮出现后，按钮行仍是单行。
+7. 工具活动默认显示为一行摘要，点开才展开；消息区不会因为活动流出现而明显变矮。
+8. 精灵完成后改动摘要默认也是一行“改动 N 个文件…”，点开才显示文件列表和“验证并重启”。
+9. 点验证：窗口会先关闭，看到“验证：typecheck / 重启窗口”进度；验证期间窗口不可操作。
+10. 窗口重启后精灵显示“已更新”，且精灵没有被一起杀掉。
+11. 让精灵改一个受保护文件，点验证，看到拒绝原因，窗口保持运行。
+12. 精灵 UI 不再显示“回滚”按钮；重启失败时仍能看到中枢自动回滚的结果。
+13. 让窗口改精灵的 skill/prompt 或 pet 核心，提交后调 `/restart {"target":"k"}`，精灵重启。
+14. 窗口重启期间，精灵仍能显示状态并继续操作。
+15. 在窗口跑一个长任务时，精灵禁用验证按钮，直接调 `/activate` 返回 409。
+16. 在精灵跑任务时调 `/restart {"target":"k"}` 返回 409；停止任务后可以正常重启。
 
 ## 限制
 

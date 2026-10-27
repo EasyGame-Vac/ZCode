@@ -9,6 +9,26 @@ function trimList(list, limit) {
   return list.length > limit ? list.slice(list.length - limit) : list;
 }
 
+/** 错误气泡只放人能读的一行；完整 stderr 已经写进 k.log。 */
+function summarizeStderr(tail) {
+  if (!tail) return "";
+  const lines = tail
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && line !== "}" && line !== "{");
+  const reversed = [...lines].reverse();
+  // 优先真正的错误行；"brain exited with an error" 只是包装，放最后当兜底。
+  const line =
+    reversed.find(
+      (candidate) =>
+        /^(error|uncaught|exception)\b/i.test(candidate) || /failed|exception/i.test(candidate),
+    ) ??
+    reversed.find((candidate) => /error|退出码/i.test(candidate)) ??
+    lines.at(-1) ??
+    "";
+  return line.length > 300 ? `${line.slice(0, 299)}…` : line;
+}
+
 function modeFromSupervisor(status) {
   if (!status) return "offline";
   const activation = status.activation;
@@ -163,8 +183,8 @@ export function reducePetState(state, action) {
       }
 
       const tail = typeof action.stderrTail === "string" ? action.stderrTail.trim() : "";
-      const detail = tail.length > 0 ? tail : `退出码 ${code}`;
-      let next = withMessage(state, "assistant", `小人运行失败：\n${detail}`);
+      const detail = summarizeStderr(tail) || `退出码 ${code}`;
+      let next = withMessage(state, "assistant", `小人运行失败：${detail}`);
       next = withActivity(next, "brain exited with an error", { code });
       return { ...next, busy: false, mode: "error", streaming: "", error: detail };
     }
@@ -228,7 +248,11 @@ export function reducePetState(state, action) {
         !state.busy;
 
       if (windowCrashed) {
-        next = withMessage(next, "assistant", "窗口版好像挂了。你可以点回滚，或者让我看看日志。");
+        next = withMessage(
+          next,
+          "assistant",
+          "窗口版好像挂了。点“日志”看看原因，或者让我重新拉起它。",
+        );
         next = withActivity(next, "window target stopped unexpectedly");
         return {
           ...next,

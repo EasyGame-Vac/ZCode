@@ -6,7 +6,11 @@ contextBridge.exposeInMainWorld("duetPet", {
   cancel: () => ipcRenderer.invoke("pet:cancel"),
   resetSession: () => ipcRenderer.invoke("pet:reset-session"),
   supervisor: (action, payload) => ipcRenderer.invoke("pet:supervisor", { action, payload }),
+  models: () => ipcRenderer.invoke("pet:models"),
+  setModel: (model) => ipcRenderer.invoke("pet:set-model", model),
   toggle: (collapsed) => ipcRenderer.invoke("pet:toggle", collapsed),
+  dragStart: () => ipcRenderer.send("pet:drag-start"),
+  dragEnd: () => ipcRenderer.send("pet:drag-end"),
   hide: () => ipcRenderer.invoke("pet:hide"),
   openLog: () => ipcRenderer.invoke("pet:open-log"),
   onEvent: (callback) => {

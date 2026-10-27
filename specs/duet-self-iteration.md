@@ -97,14 +97,23 @@ Starting `S` auto-starts every target whose `autoStart` is not false. Requests c
 ## Desktop pet
 
 - `K` is a supervisor target. `S` starts it with `scripts/duet/pet/start.mjs` and considers it ready after the renderer prints `[duet-pet] READY`.
-- Separate Electron process, frameless, transparent, always-on-top, draggable, with a tray entry and a global shortcut.
+- Separate Electron process, frameless, transparent, always-on-top, with a tray entry and a global shortcut.
+- Expanded and collapsed are two content states, not two copies of the same UI. Expanded shows the chat panel only; collapsed shows the mascot plus a one-line status in a window sized around them. The mascot remains clickable (expand) and draggable (move).
+- The expanded panel fills the window edge-to-edge. Transparent padding around the panel is only allowed in the collapsed mascot state; in expanded, it would read as a dark frame when the pet sits over a dark window.
+- On Windows, the expanded window itself is clipped to a 20px rounded rectangle with `win.setShape`; CSS `border-radius` alone only clips the page background, leaving the native window rectangular. The shape generator must inset both the top and bottom rows, and the shape is reset to a full rectangle while collapsed.
+- The panel body is a native drag region; interactive regions (messages, activity, preview, actions, composer) opt out with `no-drag`. The collapsed mascot uses a pointer-driven drag because a native drag region would swallow the click.
 - States: `offline`, `idle`, `listening`, `thinking`, `working`, `verifying`, `waiting`, `error`.
 - The pet shows the last task's changed files before activation and never activates on its own.
-- Brain command: the repository `tsx` CLI or a built `zcode.cjs`, invoked with `-p`, `--cwd`, `--output-format stream-json`, `--mode yolo`, and `--resume <sessionId>` after the first message.
+- Tool activity and the changed-file preview are collapsed one-line summaries by default; the user expands them on demand. This keeps the transcript at the remaining height instead of permanently shrinking it.
+- The composer auto-grows from one row up to the configured max height; the action row wraps into a single line because buttons never shrink and the model selector absorbs the shrink.
+- The pet exposes a model selector backed by the CLI provider registry (`zcode models --json`). The selection is persisted in `.duet/pet-state.json` and passed to the brain as `--model <provider/model>`; the "default" choice leaves the flag off.
+- The pet tray menu explicitly exposes `显示精灵（<shortcut>）`, `隐藏精灵`, `新会话`, and `退出精灵`; the tooltip includes the shortcut. The desktop app does not own a separate companion entry in v1.
+- Brain command: the repository `tsx` CLI or a built `zcode.cjs`, invoked with `-p`, `--cwd`, `--output-format stream-json`, `--mode yolo`, optionally `--model`, and `--resume <sessionId>` after the first message.
 - The pet parses NDJSON line by line, ignores unknown event types, streams `part.delta` text when available, and always uses the final `result` line as the answer.
 - `K` acquires a lease before spawning the brain and releases it on close/cancel; it heartbeats every 20s. A crash leaves a lease that expires by TTL.
 - The desktop main reports a `W` lease while the host running-task count is greater than zero, with the same heartbeat/TTL. The bridge is enabled only when `ZCODE_DUET_TARGET=w` and the supervisor URL/token env are present; production launches never set them.
-- The pet treats an active `W` lease as "窗口版正在执行任务" and disables activation/rollback until the lease clears.
+- The pet treats an active `W` lease as "窗口版正在执行任务" and disables activation until the lease clears.
+- The pet does not expose a manual rollback control. `S` still rolls back automatically when a restarted `W` cannot become ready; the `/rollback` API remains available for an explicit operator request.
 - `W` can restart `K` with `POST /restart {target:"k"}` after changing a skill or `scripts/duet/pet/**`. This restart is not gated in v1 but is rejected while `K` is busy.
 
 ## Acceptance
@@ -117,19 +126,29 @@ Starting `S` auto-starts every target whose `autoStart` is not false. Requests c
 6. A target that fails to become ready after activation triggers rollback to the last good commit.
 7. `W` can change a `K` skill or a pet source and restart `K` through `POST /restart {target:"k"}` when `K` is idle.
 8. `node scripts/duet/pet/start.mjs --smoke` creates the pet window and exits successfully when a GUI is available. When it is not, the limitation is reported.
-9. Root `pnpm lint`, `pnpm typecheck`, and `pnpm architecture:check --changed` pass, or pre-existing failures are reported unchanged.
-10. Product runtime changes are limited to the dev-only, env-gated duet lease bridge in `packages/desktop/src/main/index.ts` and `packages/desktop/src/main/desktopHostProcess.ts`; no other product runtime source is modified.
+9. The pet model selector lists the CLI provider registry models, persists a choice across restarts, and passes it as `--model`; choosing "default" omits the flag.
+10. Expanded and collapsed windows fit their content. The collapsed mascot can be dragged without losing click-to-expand, and the expanded panel can be dragged from its background.
+11. The pet UI has no manual rollback button; automatic rollback after a failed `W` restart remains unchanged.
+12. Root `pnpm lint`, `pnpm typecheck`, and `pnpm architecture:check --changed` pass, or pre-existing failures are reported unchanged.
+13. Product runtime changes are limited to the dev-only, env-gated duet lease bridge in `packages/desktop/src/main/index.ts` and `packages/desktop/src/main/desktopHostProcess.ts`, plus the CLI `--model` / `models` surface the pet needs; no other product runtime source is modified.
 
 ## Recorded validation (2026-10-27)
 
-- `pnpm test:duet`: 22 tests passed. Covers protected paths, lease TTL/release/clear, verifier pass/stop-failure/protected/dirty/commit mismatch, supervisor start/activate/busy rejection/protected rejection/gate tamper/auto-rollback/manual rollback, `k-extensions` record acceptance and rejection, and pet parser/state-machine/client behavior.
+- `pnpm test:duet`: 26 tests passed. Covers protected paths, lease TTL/release/clear, verifier pass/stop-failure/protected/dirty/commit mismatch, supervisor start/activate/busy rejection/protected rejection/gate tamper/auto-rollback/manual rollback, `k-extensions` record acceptance and rejection, pet parser/state-machine/client behavior, model-catalog JSON/cache behavior, window-drag cursor math, and supervisor renderer payload sanitization.
 - `pnpm lint`: 0 errors; 96 pre-existing warnings outside the duet files. No `scripts/duet` findings.
 - `pnpm typecheck`: passed, including the desktop lease bridge.
+- `turbo run typecheck --filter @zcode/cli`: 11 tasks passed, including the new `--model` / `models` surface.
 - `pnpm architecture:check --changed`: 0 violations.
 - `oxfmt --check scripts/duet specs/duet-self-iteration.md`: passed.
-- `node scripts/duet/pet/start.mjs --smoke`: `PET_SMOKE_OK`; `ready`, `mascot`, `messages`, and `api` were true, the window was 360×520 and always-on-top, and the screenshot was written to `.duet/pet-smoke.png`.
+- `node scripts/duet/pet/start.mjs --smoke`: `PET_SMOKE_OK` in both expanded (360×520) and collapsed (180×220) states. The renderer reported 5 model-selector options (`zcode models --json` returned 4 selectable models), `rollback:false`, and the screenshots were written to `.duet/pet-smoke.png`. After adding `transparent: true`, the collapsed screenshot no longer shows the opaque window rectangle; only the mascot and status pill are visible.
+- `zcode models --json`: returned `new-provider-2/deepseek-v4.1-flash`, `new-provider-2/gpt-5.6-terra`, `new-provider-2/gpt-5.6-sol`, and `new-provider/deepseek-v4.1-flash`; `current` was `null` (default follows the CLI registry fallback).
+- CDP interaction test (manual pet with `--remote-debugging-port=9222`): the collapsed window showed 5 model options and no rollback button; a no-movement click expanded the panel; a pointer drag entered the `dragging` state and did not expand on release; `setModel(provider/model)` persisted to `.duet/pet-state.json` and reset back to `null`. CDP cannot move the real OS cursor, so the final window translation was covered by the `window-drag` unit test rather than this run.
+- CDP layout test (360×520, five transcript messages): transcript height was 370 with no auxiliary blocks, 342 with the activity summary collapsed, 301 with activity and preview summaries collapsed, and 161 only when the user expanded both. The composer was 88px with a 34px one-row input and grew to 146px/92px for six lines. The composer action row measured `scrollWidth = clientWidth = 314`, all four buttons were 27px high, and the send button was 43px wide rather than collapsing into a circle.
+- OS-level capture (PowerShell screen grab around the live window): the reported “black border” was the 10px transparent `#app` padding showing a dark window behind the panel, not the CSS border. Expanded padding is now 0 and the panel background is opaque; sampled pixels on the panel edge are `231,231,232` over a white panel, with no dark band.
+- Window-shape test: `roundedWindowShape(360, 520, 20)` returns 41 rectangles, a full-width middle band, and inset rows at both the top and bottom. The first implementation only inset the top rows, leaving the bottom corners rectangular; the OS-level corner zooms now show a rounded bottom-left and bottom-right arc matching the two top corners.
 - Auto-start + lease integration: a temporary supervisor config used a fake W and the real pet. Both targets reached running, `[duet-pet] READY` was logged, `/activate` while W held a lease returned `409`, `/restart {target:"k"}` while K held a lease returned `409`, releasing the lease restarted K with a new PID, and stopping K/W/S succeeded.
-- Not executed: real desktop `dev:runtime` restart, a real desktop turn lease under a model-driven task, packaged-app duet bootstrap, a real model conversation, tray/global-shortcut interaction, and macOS/Linux GUI behavior.
+- Not executed: real desktop `dev:runtime` restart, a real desktop turn lease under a model-driven task, packaged-app duet bootstrap, a real model conversation with `--model`, manual drag/click interaction, tray/global-shortcut interaction, and macOS/Linux GUI behavior.
+- Known operational consequence: `scripts/duet/pet/**` is still part of the supervisor's gate hash, so the pet changes above make the running supervisor reject the next `W` activation until the supervisor is restarted with `--accept-gate-change`.
 
 ## Non-goals
 

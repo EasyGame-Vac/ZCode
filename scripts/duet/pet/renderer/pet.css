@@ -1,6 +1,6 @@
 :root {
   color-scheme: dark light;
-  --panel-bg: rgba(20, 20, 27, 0.92);
+  --panel-bg: #16161d;
   --panel-border: rgba(255, 255, 255, 0.12);
   --text: #f6f5ff;
   --muted: #a7a4bd;
@@ -61,13 +61,16 @@ button {
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  padding: 10px;
+  /* 展开态面板必须铺满窗口：任何透明留白都会透出后面的深色窗口，看起来像黑边。 */
+  padding: 0;
 }
 
 #app.collapsed {
-  padding: 6px;
+  justify-content: center;
+  padding: 10px;
 }
 
+/* 面板主体就是拖拽区；消息、活动、预览、按钮和输入区各自声明 no-drag。 */
 .panel {
   display: flex;
   width: 100%;
@@ -79,8 +82,9 @@ button {
   border-radius: 20px;
   background: var(--panel-bg);
   box-shadow: var(--shadow);
-  backdrop-filter: blur(20px) saturate(1.2);
   animation: panel-in 160ms ease-out;
+  -webkit-app-region: drag;
+  app-region: drag;
 }
 
 #app.collapsed .panel {
@@ -92,6 +96,35 @@ button {
   align-items: center;
   gap: 8px;
   padding: 10px 12px 6px;
+}
+
+.mini-mascot {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.mini-mascot::before,
+.mini-mascot::after {
+  position: absolute;
+  top: 8px;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: #16141f;
+  content: "";
+}
+
+.mini-mascot::before {
+  left: 6px;
+}
+
+.mini-mascot::after {
+  left: 13px;
 }
 
 .drag-handle {
@@ -222,23 +255,86 @@ button {
   animation: caret 1s steps(1) infinite;
 }
 
-.activity {
-  display: flex;
-  max-height: 76px;
-  flex-direction: column;
-  gap: 3px;
-  overflow-y: auto;
+.activity-bar {
+  flex: none;
   padding: 0 12px 6px;
-  color: var(--muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 10.5px;
-  line-height: 1.35;
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }
 
-.activity:empty {
+.activity-bar[hidden] {
   display: none;
+}
+
+.activity-toggle,
+.preview-toggle {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  overflow: hidden;
+  border: none;
+  border-radius: 8px;
+  background: var(--activity);
+  color: var(--muted);
+  font-size: 10.5px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.activity-toggle:hover,
+.preview-toggle:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+#activity-summary,
+#preview-title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.activity-dot {
+  width: 5px;
+  height: 5px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--accent-2);
+}
+
+.caret {
+  flex: none;
+  font-size: 10px;
+  transition: transform 120ms ease;
+}
+
+.activity-bar.expanded .caret,
+.preview.expanded .caret {
+  transform: rotate(90deg);
+}
+
+.activity {
+  display: none;
+  max-height: 76px;
+  flex-direction: column;
+  gap: 3px;
+  overflow-y: auto;
+  padding-top: 5px;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+
+.activity-bar.expanded .activity {
+  display: flex;
+}
+
+.activity:empty {
+  display: none !important;
 }
 
 .activity-item {
@@ -251,10 +347,9 @@ button {
 }
 
 .preview {
-  max-height: 150px;
   margin: 0 12px 8px;
-  padding: 8px 10px;
-  overflow-y: auto;
+  padding: 6px 8px;
+  overflow: hidden;
   border: 1px solid var(--panel-border);
   border-radius: 11px;
   background: rgba(255, 255, 255, 0.045);
@@ -266,19 +361,32 @@ button {
   display: none;
 }
 
-.preview-title {
-  margin-bottom: 6px;
+.preview-toggle {
+  padding: 2px 0;
+  background: transparent;
   color: var(--text);
   font-size: 11px;
   font-weight: 600;
 }
 
+.preview-toggle:hover {
+  background: transparent;
+  color: var(--accent);
+}
+
 .preview-files {
-  display: flex;
+  display: none;
+  max-height: 140px;
   flex-direction: column;
   gap: 3px;
+  overflow-y: auto;
+  padding-top: 6px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 10.5px;
+}
+
+.preview.expanded .preview-files {
+  display: flex;
 }
 
 .preview-file {
@@ -395,9 +503,10 @@ button:disabled {
 }
 
 .composer textarea {
-  min-height: 38px;
+  min-height: 34px;
   max-height: 92px;
-  padding: 8px 10px;
+  padding: 7px 10px;
+  overflow-y: auto;
   resize: none;
   border: none;
   border-radius: 11px;
@@ -418,23 +527,72 @@ button:disabled {
 
 .composer-row {
   display: flex;
+  flex-wrap: nowrap;
   align-items: center;
-  justify-content: flex-end;
   gap: 6px;
 }
 
-#reset-button {
-  margin-right: auto;
+/* 对话中会多出“停止”按钮；按钮必须保持单行，由模型选择器承担收缩。 */
+.composer-row button {
+  flex: none;
+  padding: 5px 9px;
+  white-space: nowrap;
+}
+
+.composer-spacer {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.model-select {
+  max-width: 128px;
+  min-width: 0;
+  flex: 1 1 128px;
+  padding: 4px 5px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  outline: none;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.model-select:focus {
+  border-color: rgba(139, 124, 255, 0.45);
+}
+
+.model-select:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.pet-stack {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  cursor: grab;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+#app.collapsed .pet-stack {
+  display: flex;
 }
 
 .mascot {
-  width: 118px;
-  height: 118px;
+  width: 150px;
+  height: 150px;
   flex: none;
   padding: 0;
   border: none;
   background: transparent;
-  cursor: pointer;
+  cursor: inherit;
   filter: drop-shadow(0 10px 18px rgba(0, 0, 0, 0.35));
   transition:
     transform 180ms ease,
@@ -444,16 +602,41 @@ button:disabled {
 }
 
 .mascot:hover {
-  transform: translateY(-2px) scale(1.03);
+  transform: translateY(-2px) scale(1.02);
 }
 
 .mascot:active {
   transform: scale(0.98);
 }
 
-#app.collapsed .mascot {
-  width: 132px;
-  height: 132px;
+#app.dragging .mascot {
+  transform: none;
+}
+
+.collapsed-status {
+  display: flex;
+  max-width: 156px;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  overflow: hidden;
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  background: var(--panel-bg);
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: inherit;
+  backdrop-filter: blur(14px) saturate(1.2);
+}
+
+#collapsed-status-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pet-stack:active {
+  cursor: grabbing;
 }
 
 .mascot-svg {
@@ -645,14 +828,13 @@ button:disabled {
   }
 }
 
+/* 拖拽区不能用 transform 动画，否则 Windows 上的命中区域会停在旧位置。 */
 @keyframes panel-in {
   from {
     opacity: 0;
-    transform: translateY(6px) scale(0.98);
   }
   to {
     opacity: 1;
-    transform: none;
   }
 }
 
@@ -668,7 +850,7 @@ button:disabled {
 
 @media (prefers-color-scheme: light) {
   :root {
-    --panel-bg: rgba(255, 255, 255, 0.94);
+    --panel-bg: #ffffff;
     --panel-border: rgba(22, 20, 34, 0.1);
     --text: #1b1a24;
     --muted: #6d6a80;
@@ -694,7 +876,8 @@ button:disabled {
     stroke: rgba(27, 26, 36, 0.55);
   }
 
-  .composer textarea {
+  .composer textarea,
+  .model-select {
     background: rgba(22, 20, 34, 0.055);
   }
 
@@ -706,5 +889,10 @@ button:disabled {
 
   button.secondary {
     background: rgba(22, 20, 34, 0.05);
+  }
+
+  .activity-toggle:hover,
+  .preview-toggle:hover {
+    background: rgba(22, 20, 34, 0.07);
   }
 }

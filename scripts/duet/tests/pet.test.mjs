@@ -5,8 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { classifyEvent, createEventStream, createLineParser } from "../pet/lib/event-parser.mjs";
+import { createModelCatalog } from "../pet/lib/model-catalog.mjs";
 import { createInitialPetState, reducePetState } from "../pet/lib/state-machine.mjs";
+import { createSupervisorActions } from "../pet/lib/supervisor-actions.mjs";
 import { createSupervisorClient, SupervisorError } from "../pet/lib/supervisor-client.mjs";
+import { createWindowDrag } from "../pet/lib/window-drag.mjs";
+import { roundedWindowShape } from "../pet/lib/window-shape.mjs";
 
 test("classifyEvent maps text, tools and the final result", () => {
   assert.deepEqual(
@@ -171,6 +175,160 @@ test("pet state machine reports a brain failure and a window crash once", () => 
     status: { targets: { w: { status: "stopped" } }, activation: null },
   });
   assert.equal(crashed.messages.length, crashMessageCount);
+});
+
+test("brain failure keeps one readable stderr line instead of the raw JSON dump", () => {
+  let state = createInitialPetState();
+  state = reducePetState(state, { type: "user-message", text: "hi" });
+  state = reducePetState(state, { type: "brain-start" });
+  state = reducePetState(state, {
+    type: "brain-exit",
+    code: 1,
+    stderrTail: [
+      '{\n  "name": "AI_APICallError",',
+      '  "isRetryable": false',
+      "}",
+      "Error: Turn execution failed (traceId: abc)",
+      "brain exited with an error",
+    ].join("\n"),
+  });
+
+  assert.equal(state.mode, "error");
+  assert.equal(
+    state.messages.at(-1).text,
+    "小人运行失败：Error: Turn execution failed (traceId: abc)",
+  );
+});
+
+test("model catalog reads the CLI JSON, tolerates log noise and caches the result", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "zcode-duet-models-"));
+  try {
+    const script = join(directory, "models.mjs");
+    await writeFile(
+      script,
+      [
+        'console.log("refreshing providers…");',
+        "console.log(JSON.stringify({",
+        "  ok: true,",
+        '  current: { providerId: "p", modelId: "m" },',
+        '  models: [{ ref: { providerId: "p", modelId: "m" } }]',
+        "}));",
+      ].join("\n"),
+    );
+    let runs = 0;
+    const catalog = createModelCatalog({
+      resolveCommand: () => {
+        runs += 1;
+        return { command: process.execPath, args: [script], cwd: directory };
+      },
+      ttlMs: 60_000,
+    });
+
+    const first = await catalog.listModels();
+    assert.deepEqual(first.current, { providerId: "p", modelId: "m" });
+    assert.equal(first.models.length, 1);
+    const second = await catalog.listModels();
+    assert.equal(second, first);
+    assert.equal(runs, 1);
+  } finally {
+    await rm(directory, { force: true, maxRetries: 10, recursive: true, retryDelay: 100 });
+  }
+});
+
+test("window drag follows the cursor delta and saves once on stop", async () => {
+  let cursor = { x: 100, y: 200 };
+  const positions = [];
+  let ended = 0;
+  const window = {
+    getBounds: () => ({ x: 10, y: 20, width: 180, height: 220 }),
+    isDestroyed: () => false,
+    setPosition: (x, y) => positions.push([x, y]),
+  };
+  const drag = createWindowDrag({
+    getWindow: () => window,
+    screen: { getCursorScreenPoint: () => cursor },
+    pollMs: 10,
+    timeoutMs: 1_000,
+    onEnd: () => {
+      ended += 1;
+    },
+  });
+
+  drag.start();
+  cursor = { x: 160, y: 240 };
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  drag.stop();
+  drag.stop();
+
+  assert.ok(
+    positions.some(([x, y]) => x === 70 && y === 60),
+    JSON.stringify(positions),
+  );
+  assert.equal(ended, 1);
+});
+
+test("rounded window shape insets the top and bottom corners and keeps a full middle band", () => {
+  const rects = roundedWindowShape(360, 520, 20);
+  assert.equal(rects.length, 41);
+  assert.deepEqual(
+    rects.find((rect) => rect.y === 20),
+    { x: 0, y: 20, width: 360, height: 480 },
+  );
+  const top = rects.find((rect) => rect.y === 0);
+  const bottom = rects.find((rect) => rect.y === 519);
+  assert.ok(top.x > 0 && top.width < 360, JSON.stringify(top));
+  assert.ok(bottom.x > 0 && bottom.width < 360, JSON.stringify(bottom));
+});
+
+test("supervisor actions clamp renderer payloads and reject unknown actions", async () => {
+  const calls = [];
+  const actions = createSupervisorActions({
+    getSupervisor: () => ({
+      activate: async (body) => {
+        calls.push(["activate", body]);
+        return { ok: true };
+      },
+      getLedger: async (limit) => {
+        calls.push(["ledger", limit]);
+        return { ok: true };
+      },
+      getStatus: async () => ({ ok: true }),
+      preview: async (body) => {
+        calls.push(["preview", body]);
+        return { ok: true };
+      },
+      restart: async (body) => {
+        calls.push(["restart", body]);
+        return { ok: true };
+      },
+      rollback: async (body) => {
+        calls.push(["rollback", body]);
+        return { ok: true };
+      },
+    }),
+  });
+
+  await actions.handle("activate", {
+    commit: "c".repeat(300),
+    profile: "x".repeat(100),
+    target: "k",
+    tests: ["a", 3, "b"],
+  });
+  assert.deepEqual(calls.at(-1), [
+    "activate",
+    {
+      actor: "pet",
+      commit: "c".repeat(128),
+      profile: "x".repeat(32),
+      target: "w",
+      tests: ["a", "b"],
+    },
+  ]);
+
+  await actions.handle("ledger", { limit: 999 });
+  assert.deepEqual(calls.at(-1), ["ledger", 200]);
+
+  await assert.rejects(() => actions.handle("delete-everything"), /未知的宿管动作/);
 });
 
 async function withServer(handler, run) {
