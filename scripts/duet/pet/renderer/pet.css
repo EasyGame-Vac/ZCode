@@ -421,7 +421,10 @@ button {
 }
 
 .preview-warning {
+  max-height: 72px;
   margin-top: 6px;
+  padding-right: 4px;
+  overflow-y: auto;
   color: var(--warning);
   font-size: 10.5px;
   white-space: pre-wrap;

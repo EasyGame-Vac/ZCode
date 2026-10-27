@@ -40,6 +40,7 @@ let modelsLoading = false;
 let dragState = null;
 let activityExpanded = false;
 let previewExpanded = false;
+let persistedMessageSignature = "";
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
@@ -254,6 +255,15 @@ function renderActions() {
   modelSelect.disabled = isLocked() || modelsLoading;
 }
 
+function persistMessages() {
+  if (!api.saveMessages) return;
+  const last = state.messages.at(-1);
+  const signature = `${state.messages.length}:${last?.id ?? ""}:${last?.text?.length ?? 0}`;
+  if (signature === persistedMessageSignature) return;
+  persistedMessageSignature = signature;
+  void api.saveMessages(state.messages).catch(() => {});
+}
+
 function render() {
   const label = statusLabel();
   app.dataset.state = state.mode;
@@ -264,6 +274,7 @@ function render() {
   renderActivity();
   renderPreview();
   renderActions();
+  persistMessages();
 }
 
 function ensureGreeting() {
@@ -314,6 +325,8 @@ function handleBrainEvent(event) {
 }
 
 function handleTaskComplete(payload) {
+  // 本轮没有新提交也没有未提交改动时不显示预览，避免把历史提交反复列出来。
+  if (payload?.noChanges) return;
   if (payload?.preview) {
     previewExpanded = false;
     dispatch({ type: "preview", preview: payload.preview });
@@ -714,11 +727,14 @@ async function boot() {
     applyCollapsedClass();
     applyModelValue(info?.model);
     supervisorOnline = Boolean(info?.status);
+    const restoredMessages = Array.isArray(info?.messages) ? info.messages : [];
     dispatch({
       type: "init",
       status: info?.status ?? null,
       sessionId: info?.sessionId ?? null,
+      messages: restoredMessages,
     });
+    if (restoredMessages.length > 0) greeted = true;
     ensureGreeting();
   } catch (error) {
     renderFallback(`初始化失败：${errorMessage(error)}`);

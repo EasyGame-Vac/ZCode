@@ -5,10 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { classifyEvent, createEventStream, createLineParser } from "../pet/lib/event-parser.mjs";
+import { createMessageStore } from "../pet/lib/message-store.mjs";
 import { createModelCatalog } from "../pet/lib/model-catalog.mjs";
 import { createInitialPetState, reducePetState } from "../pet/lib/state-machine.mjs";
 import { createSupervisorActions } from "../pet/lib/supervisor-actions.mjs";
 import { createSupervisorClient, SupervisorError } from "../pet/lib/supervisor-client.mjs";
+import { shouldShowTaskPreview } from "../pet/lib/task-preview.mjs";
 import { createWindowDrag } from "../pet/lib/window-drag.mjs";
 import { roundedWindowShape } from "../pet/lib/window-shape.mjs";
 
@@ -145,6 +147,18 @@ test("pet state machine follows a task and announces success once", () => {
   assert.notEqual(state.preview, null);
 });
 
+test("pet state machine restores persisted messages on init", () => {
+  const state = reducePetState(createInitialPetState(), {
+    type: "init",
+    status: null,
+    messages: [{ id: "m1", role: "user", text: "之前的对话" }],
+  });
+  assert.deepEqual(
+    state.messages.map((message) => message.text),
+    ["之前的对话"],
+  );
+});
+
 test("pet state machine reports a brain failure and a window crash once", () => {
   let state = createInitialPetState();
   state = reducePetState(state, { type: "user-message", text: "hi" });
@@ -278,6 +292,58 @@ test("rounded window shape insets the top and bottom corners and keeps a full mi
   const bottom = rects.find((rect) => rect.y === 519);
   assert.ok(top.x > 0 && top.width < 360, JSON.stringify(top));
   assert.ok(bottom.x > 0 && bottom.width < 360, JSON.stringify(bottom));
+});
+
+test("message store round-trips visible messages and ignores invalid roles", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "zcode-duet-messages-"));
+  try {
+    const store = createMessageStore(join(directory, "pet-messages.json"));
+    assert.deepEqual(await store.read(), []);
+
+    await store.save([
+      { role: "user", text: "改窗口" },
+      { role: "assistant", text: "好" },
+      { role: "system", text: "不应保存" },
+      { role: "assistant", text: "" },
+    ]);
+    const read = await store.read();
+    assert.deepEqual(
+      read.map((message) => [message.role, message.text]),
+      [
+        ["user", "改窗口"],
+        ["assistant", "好"],
+      ],
+    );
+
+    await store.clear();
+    assert.deepEqual(await store.read(), []);
+  } finally {
+    await rm(directory, { force: true, maxRetries: 10, recursive: true, retryDelay: 100 });
+  }
+});
+
+test("task preview only appears for commits created by this task", () => {
+  const changes = [{ status: "M", path: "a.ts" }];
+  assert.equal(
+    shouldShowTaskPreview({ startHead: "a", endHead: "a", changes, dirty: false }),
+    false,
+  );
+  assert.equal(
+    shouldShowTaskPreview({ startHead: "a", endHead: "b", changes, dirty: false }),
+    true,
+  );
+  assert.equal(
+    shouldShowTaskPreview({ startHead: "a", endHead: "b", changes: [], dirty: true }),
+    true,
+  );
+  assert.equal(
+    shouldShowTaskPreview({ startHead: "a", endHead: "b", changes: [], dirty: false }),
+    false,
+  );
+  assert.equal(
+    shouldShowTaskPreview({ startHead: undefined, endHead: "b", changes, dirty: false }),
+    false,
+  );
 });
 
 test("supervisor actions clamp renderer payloads and reject unknown actions", async () => {

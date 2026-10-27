@@ -16,9 +16,12 @@ import {
 import { stopProcessTree } from "../lib/process.mjs";
 import { resolveBrainCommand } from "./lib/brain-command.mjs";
 import { createEventStream } from "./lib/event-parser.mjs";
+import { readGitHead } from "./lib/git-head.mjs";
+import { createMessageStore } from "./lib/message-store.mjs";
 import { createModelCatalog } from "./lib/model-catalog.mjs";
 import { createSupervisorActions } from "./lib/supervisor-actions.mjs";
 import { createSupervisorClient } from "./lib/supervisor-client.mjs";
+import { shouldShowTaskPreview } from "./lib/task-preview.mjs";
 import { createWindowDrag } from "./lib/window-drag.mjs";
 import { createWindowShape } from "./lib/window-shape.mjs";
 
@@ -26,6 +29,7 @@ const REPO_ROOT = resolve(import.meta.dirname, "../../..");
 const CONFIG_PATH = join(REPO_ROOT, "scripts", "duet", "config.json");
 const STATE_DIR = join(REPO_ROOT, ".duet");
 const PET_STATE_PATH = join(STATE_DIR, "pet-state.json");
+const PET_MESSAGES_PATH = join(STATE_DIR, "pet-messages.json");
 const SESSION_PATH = join(STATE_DIR, "pet-session.json");
 const TOKEN_PATH = join(STATE_DIR, "token");
 // 精灵 UI 的“日志”按钮指向精灵自己的日志；窗口日志由 supervisor 的 /status 暴露。
@@ -290,6 +294,7 @@ function createWindow() {
               api: Boolean(window.duetPet),
               state: document.body?.dataset?.petMode ?? null,
               collapsed: document.querySelector("#app")?.classList.contains("collapsed") ?? false,
+              messageCount: document.querySelectorAll("#messages .message").length,
               modelOptions: select ? select.options.length : 0,
               modelValue: select ? select.value : null,
               rollback: Boolean(document.querySelector("#rollback-button"))
@@ -418,6 +423,7 @@ const brainCommand = () =>
   resolveBrainCommand({ repoRoot: REPO_ROOT, brain: petConfig.brain ?? {} });
 
 const modelCatalog = createModelCatalog({ resolveCommand: brainCommand });
+const petMessages = createMessageStore(PET_MESSAGES_PATH);
 
 async function setModel(model) {
   const next = typeof model === "string" ? model.trim() : "";
@@ -439,9 +445,28 @@ async function setModel(model) {
   return { ok: true, model: petState.model };
 }
 
-async function finishTask(result) {
+async function finishTask(result, startHead) {
   try {
-    const preview = await supervisor.preview({ target: "w" });
+    // 只有本轮真的产生了新 commit 才比较 preview；否则会把历史提交或用户已有的
+    // 未提交改动当成这次任务的结果，随便问一句也弹出几十个文件。
+    const endHead = startHead ? await readGitHead(REPO_ROOT) : null;
+    if (!startHead || !endHead || endHead === startHead) {
+      sendEvent("task-complete", { preview: null, result, noChanges: true });
+      return;
+    }
+
+    const preview = await supervisor.preview({ target: "w", base: startHead });
+    if (
+      !shouldShowTaskPreview({
+        startHead,
+        endHead,
+        changes: preview?.changes,
+        dirty: preview?.dirty,
+      })
+    ) {
+      sendEvent("task-complete", { preview: null, result, noChanges: true });
+      return;
+    }
     sendEvent("task-complete", { preview, result });
   } catch (error) {
     sendEvent("task-complete", {
@@ -534,6 +559,7 @@ async function sendMessage(text) {
     if (petState.model) args.push("--model", petState.model);
     if (sessionId) args.push("--resume", sessionId);
 
+    const startHead = await readGitHead(REPO_ROOT);
     lease = await acquireBrainLease("brain turn");
     child = spawn(base.command, args, {
       cwd: base.cwd,
@@ -542,7 +568,7 @@ async function sendMessage(text) {
       windowsHide: true,
     });
 
-    current = { cancelled: false, child, lease };
+    current = { cancelled: false, child, lease, startHead };
     brain = current;
     brainStarting = false;
     let result = null;
@@ -590,7 +616,7 @@ async function sendMessage(text) {
         signal,
         stderrTail: tail(stderr, 40),
       });
-      if (result) void finishTask(result);
+      if (result) void finishTask(result, current.startHead);
     });
 
     child.once("error", (error) => {
@@ -623,6 +649,7 @@ async function cancelBrain() {
 
 async function clearSession() {
   await rm(SESSION_PATH, { force: true });
+  await petMessages.clear();
   sendEvent("session-reset", {});
 }
 
@@ -654,9 +681,20 @@ function registerIpc() {
       },
       sessionId: await loadSessionId(),
       model: petState.model ?? null,
+      messages: await petMessages.read(),
       status,
       smoke: IS_SMOKE,
     };
+  });
+
+  ipcMain.handle("pet:save-messages", async (_event, messages) => {
+    try {
+      await petMessages.save(messages);
+      return { ok: true };
+    } catch (error) {
+      warn("save messages failed:", error);
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
   });
 
   ipcMain.handle("pet:models", async () => {

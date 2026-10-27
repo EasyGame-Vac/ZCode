@@ -99,6 +99,7 @@ export function reducePetState(state, action) {
         ...state,
         supervisor,
         sessionId: action.sessionId ?? state.sessionId,
+        messages: Array.isArray(action.messages) ? action.messages : state.messages,
         activation: supervisor?.activation ?? state.activation,
         lastWStatus: supervisor?.targets?.w?.status ?? null,
       };
