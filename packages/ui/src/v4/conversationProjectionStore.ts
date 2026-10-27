@@ -436,10 +436,9 @@ export class ConversationProjectionStore {
    * 不会把已裁掉的行放回来。
    */
   setLiveTurnLimit(turnLimit: number | null): void {
-    if (this.liveTurnLimit === turnLimit) return;
+    // 同一 SessionPane 重挂或任务切回时，store 可能是 keep-warm 的：limit 已经是 3，
+    // 但窗口仍保留着上次非跟随时读到的更多轮。这里必须再裁一次，不能因同值早退。
     this.liveTurnLimit = turnLimit;
-    // 首次设置/会话打开时必须收敛窗口；following 只用于后续实时帧，
-    // 避免恢复的滚动位置或共享 pane 把 following 留在 false 导致永不裁剪。
     this.commitLiveRetention();
   }
 

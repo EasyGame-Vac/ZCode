@@ -205,6 +205,7 @@ describe("derivePerformanceHudMetrics", () => {
       at: number,
       outputTokens: number,
       modelOutputDurationMs: number,
+      latency: { timeToFirstContentMs: number; lastRequestDurationMs: number },
     ) =>
       ({
         rowId,
@@ -218,10 +219,17 @@ describe("derivePerformanceHudMetrics", () => {
         endedAt: at + modelOutputDurationMs,
         outputTokens,
         modelOutputDurationMs,
+        ...latency,
       }) as unknown as Parameters<typeof derivePerformanceHudMetrics>[0]["rows"][number];
     const rows = [
-      header(1, now - 2 * 60 * 60 * 1000, 2_000, 40_000),
-      header(2, now - 5 * 60 * 1000, 1_000, 10_000),
+      header(1, now - 2 * 60 * 60 * 1000, 2_000, 40_000, {
+        timeToFirstContentMs: 2_000,
+        lastRequestDurationMs: 50_000,
+      }),
+      header(2, now - 5 * 60 * 1000, 1_000, 10_000, {
+        timeToFirstContentMs: 1_200,
+        lastRequestDurationMs: 12_000,
+      }),
     ];
     const windowInput = { rows, usage, config } as unknown as Parameters<
       typeof derivePerformanceHudMetrics
@@ -231,10 +239,56 @@ describe("derivePerformanceHudMetrics", () => {
     expect(lastHour.windowTokensPerSecond).toBe(100);
     expect(lastHour.windowOutputTokens).toBe(1_000);
     expect(lastHour.windowTurnCount).toBe(1);
+    expect(lastHour.lastTimeToFirstContentMs).toBe(1_200);
+    expect(lastHour.lastRequestDurationMs).toBe(12_000);
+    expect(lastHour.ttftP50Ms).toBe(1_200);
+    expect(lastHour.ttftP90Ms).toBe(1_200);
+    expect(lastHour.requestDurationP50Ms).toBe(12_000);
+    expect(lastHour.requestDurationP90Ms).toBe(12_000);
 
     const session = derivePerformanceHudMetrics(windowInput, now, "session");
     expect(session.windowTokensPerSecond).toBe(60);
     expect(session.windowOutputTokens).toBe(3_000);
     expect(session.windowTurnCount).toBe(2);
+    expect(session.ttftP50Ms).toBe(1_600);
+    expect(session.ttftP90Ms).toBe(1_920);
+    expect(session.requestDurationP50Ms).toBe(31_000);
+    expect(session.requestDurationP90Ms).toBe(46_200);
+  });
+
+  it("keeps last TTFT and request duration on the same request", () => {
+    const now = 10_000_000;
+    const header = (
+      rowId: number,
+      at: number,
+      latency: { timeToFirstContentMs?: number; lastRequestDurationMs: number },
+    ) =>
+      ({
+        rowId,
+        turnId: `turn-${rowId}`,
+        createdAt: at,
+        createdAtSeq: rowId,
+        kind: "turnHeader",
+        origin: "userInput",
+        state: "completedSuccess",
+        startedAt: at,
+        endedAt: at + 1_000,
+        ...latency,
+      }) as unknown as Parameters<typeof derivePerformanceHudMetrics>[0]["rows"][number];
+    const rows = [
+      header(1, now - 60_000, { timeToFirstContentMs: 2_000, lastRequestDurationMs: 9_000 }),
+      // 最近一次是纯工具调用：有请求耗时，没有首字。
+      header(2, now - 10_000, { lastRequestDurationMs: 5_000 }),
+    ];
+    const metrics = derivePerformanceHudMetrics(
+      { rows, usage, config } as unknown as Parameters<typeof derivePerformanceHudMetrics>[0],
+      now,
+      "5m",
+    );
+
+    expect(metrics.lastRequestDurationMs).toBe(5_000);
+    expect(metrics.lastTimeToFirstContentMs).toBeNull();
+    // 窗口分位数仍可复用更早的有效首字样本。
+    expect(metrics.ttftP50Ms).toBe(2_000);
   });
 });

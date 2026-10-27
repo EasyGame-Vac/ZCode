@@ -334,6 +334,13 @@ export interface PerformanceHudMetrics {
   windowOutputTokens: number;
   windowDurationMs: number;
   windowTurnCount: number;
+  lastRequestDurationMs: number | null;
+  lastTimeToFirstContentMs: number | null;
+  ttftP50Ms: number | null;
+  ttftP90Ms: number | null;
+  requestDurationP50Ms: number | null;
+  requestDurationP90Ms: number | null;
+  latencySampleCount: number;
   provider: string;
   model: string;
 }
@@ -375,6 +382,9 @@ export function derivePerformanceHudMetrics(
   let lastTurnOutputTokens: number | null = null;
   const completedRates: number[] = [];
   let lastCompletedTokensPerSecond: number | null = null;
+  let lastRequestDurationMs: number | null = null;
+  let lastTimeToFirstContentMs: number | null = null;
+  let lastTimingRowFound = false;
   for (let index = input.rows.length - 1; index >= 0; index -= 1) {
     const row = input.rows[index];
     if (row?.kind !== "turnHeader") continue;
@@ -388,6 +398,20 @@ export function derivePerformanceHudMetrics(
     }
     if (lastTurnOutputTokens === null && row.outputTokens !== undefined) {
       lastTurnOutputTokens = row.outputTokens;
+    }
+    // 首字与请求耗时必须来自同一条最近请求；若最近请求没有首字（纯工具调用），
+    // 显示 “—” 而不是回退到更早一轮的旧首字。
+    if (
+      !lastTimingRowFound &&
+      typeof row.lastRequestDurationMs === "number" &&
+      row.lastRequestDurationMs >= 0
+    ) {
+      lastRequestDurationMs = row.lastRequestDurationMs;
+      lastTimeToFirstContentMs =
+        typeof row.timeToFirstContentMs === "number" && row.timeToFirstContentMs >= 0
+          ? row.timeToFirstContentMs
+          : null;
+      lastTimingRowFound = true;
     }
   }
   const recentRates = completedRates.slice(0, 30).reverse();
@@ -408,10 +432,18 @@ export function derivePerformanceHudMetrics(
   let windowOutputTokens = 0;
   let windowDurationMs = 0;
   let windowTurnCount = 0;
+  const ttftValues: number[] = [];
+  const requestDurationValues: number[] = [];
   for (const row of input.rows) {
     if (row.kind !== "turnHeader") continue;
     const at = row.endedAt ?? row.startedAt ?? row.createdAt;
     if (windowCutoff !== null && at < windowCutoff) continue;
+    if (typeof row.timeToFirstContentMs === "number" && row.timeToFirstContentMs >= 0) {
+      ttftValues.push(row.timeToFirstContentMs);
+    }
+    if (typeof row.lastRequestDurationMs === "number" && row.lastRequestDurationMs >= 0) {
+      requestDurationValues.push(row.lastRequestDurationMs);
+    }
     const outputTokens = row.outputTokens ?? 0;
     const outputDurationMs = row.modelOutputDurationMs ?? 0;
     if (outputTokens <= 0 || outputDurationMs <= 0) continue;
@@ -421,6 +453,8 @@ export function derivePerformanceHudMetrics(
   }
   const windowTokensPerSecond =
     windowDurationMs > 0 ? (windowOutputTokens * 1000) / windowDurationMs : null;
+  const sortedTtft = [...ttftValues].sort((left, right) => left - right);
+  const sortedRequestDuration = [...requestDurationValues].sort((left, right) => left - right);
 
   return {
     liveTokensPerSecond: live?.tokensPerSecond ?? null,
@@ -439,6 +473,13 @@ export function derivePerformanceHudMetrics(
     windowOutputTokens,
     windowDurationMs,
     windowTurnCount,
+    lastRequestDurationMs,
+    lastTimeToFirstContentMs,
+    ttftP50Ms: percentileOf(sortedTtft, 50),
+    ttftP90Ms: percentileOf(sortedTtft, 90),
+    requestDurationP50Ms: percentileOf(sortedRequestDuration, 50),
+    requestDurationP90Ms: percentileOf(sortedRequestDuration, 90),
+    latencySampleCount: ttftValues.length,
     provider: input.config.provider,
     model: input.config.model,
   };

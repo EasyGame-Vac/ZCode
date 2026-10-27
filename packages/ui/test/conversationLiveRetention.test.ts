@@ -18,6 +18,38 @@ function row(rowId: number, turnId: string): ConversationRow {
   };
 }
 
+function headerRow(
+  rowId: number,
+  turnId: string,
+  origin: "userInput" | "backgroundResult" | "workflowLaunch" = "userInput",
+  executionKind: "agent" | "controlOnly" = "agent",
+): ConversationRow {
+  return {
+    rowId,
+    turnId,
+    createdAt: 1,
+    createdAtSeq: rowId,
+    kind: "turnHeader",
+    origin,
+    executionKind,
+    state: "completedSuccess",
+    startedAt: 1,
+    activeMs: 1,
+  };
+}
+
+function realUserRow(rowId: number, turnId: string): ConversationRow {
+  return {
+    rowId,
+    turnId,
+    createdAt: 1,
+    createdAtSeq: rowId,
+    kind: "userInput",
+    origin: "realUser",
+    text: `user-${rowId}`,
+  };
+}
+
 function snapshotWithRows(
   rows: readonly ConversationRow[],
   firstRowId: number | null = 1,
@@ -67,6 +99,62 @@ describe("trimRowsToRecentTurns", () => {
     const rows = [row(10, "t2"), row(11, "t3"), row(12, "t3")];
     const trimmed = trimRowsToRecentTurns(rows, 1);
     expect(trimmed?.window.map((item) => item.rowId)).toEqual([11, 12]);
+    expect(trimmed?.removedTurns).toBe(1);
+  });
+
+  it("控制轮不占 K，并随最老保留产品轮一起保留", () => {
+    const rows = [
+      headerRow(1, "p1"),
+      row(2, "p1"),
+      headerRow(3, "c1", "backgroundResult", "controlOnly"),
+      row(4, "c1"),
+      headerRow(5, "p2"),
+      row(6, "p2"),
+      headerRow(7, "c2", "workflowLaunch", "controlOnly"),
+      row(8, "c2"),
+      headerRow(9, "p3"),
+      row(10, "p3"),
+      // 没有 turnHeader 的 timeline-only 控制轮。
+      row(11, "c3"),
+      row(12, "c3"),
+      headerRow(13, "p4"),
+      row(14, "p4"),
+    ];
+
+    const trimmed = trimRowsToRecentTurns(rows, 2);
+
+    // 保留 p3 起的产品轮及其之后的控制轮；p1/p2 和它们之间的控制轮被裁掉。
+    expect(trimmed?.window.map((item) => item.rowId)).toEqual([9, 10, 11, 12, 13, 14]);
+    expect(trimmed?.removedTurns).toBe(2);
+  });
+
+  it("background/workflow 的 header 不占产品轮", () => {
+    const rows = [
+      headerRow(1, "p1"),
+      row(2, "p1"),
+      headerRow(3, "c1", "backgroundResult", "controlOnly"),
+      row(4, "c1"),
+      headerRow(5, "p2"),
+      row(6, "p2"),
+    ];
+
+    const trimmed = trimRowsToRecentTurns(rows, 1);
+
+    expect(trimmed?.window.map((item) => item.rowId)).toEqual([5, 6]);
+    expect(trimmed?.removedTurns).toBe(1);
+  });
+
+  it("没有 turnHeader 但含 realUser 行仍算产品轮", () => {
+    const rows = [
+      realUserRow(1, "p1"),
+      row(2, "p1"),
+      realUserRow(3, "p2"),
+      row(4, "p2"),
+    ];
+
+    const trimmed = trimRowsToRecentTurns(rows, 1);
+
+    expect(trimmed?.window.map((item) => item.rowId)).toEqual([3, 4]);
     expect(trimmed?.removedTurns).toBe(1);
   });
 });

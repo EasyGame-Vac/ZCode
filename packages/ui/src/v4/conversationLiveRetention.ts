@@ -24,9 +24,14 @@ export interface LiveRetentionTrim {
 }
 
 /**
- * 从窗口头部裁掉较早的产品轮，只保留最近 turnLimit 个 turnId。
+ * 从窗口头部裁掉较早的产品轮，只保留最近 turnLimit 个**产品轮**。
+ *
+ * 一个 turnId 不一定是产品轮：background result、subagent 汇总、workflow 通知、
+ * compaction marker 等可以各自形成 timeline-only / controlOnly 轮。它们不占 K，
+ * 但只要位于最老保留产品轮之后，就随窗口一起保留，避免把当前工作的控制项裁掉。
  *
  * 返回 null 表示无需裁剪。rows 必须按时间顺序排列（projection window 的既有约束）。
+ * 没有任何产品轮（例如纯后台/子智能体会话）时退化为按 turnId 计数的旧规则，保证有界。
  */
 export function trimRowsToRecentTurns(
   rows: readonly ConversationRow[],
@@ -34,6 +39,63 @@ export function trimRowsToRecentTurns(
 ): LiveRetentionTrim | null {
   if (turnLimit <= 0 || rows.length === 0) return null;
 
+  interface TurnGroup {
+    turnId: string;
+    start: number;
+    /** turnHeader 的裁决：true=产品轮，false=控制轮，null=该轮没有 turnHeader。 */
+    headerProduct: boolean | null;
+    hasRealUser: boolean;
+  }
+
+  const groups: TurnGroup[] = [];
+  let current: TurnGroup | null = null;
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index]!;
+    if (current === null || current.turnId !== row.turnId) {
+      current = {
+        turnId: row.turnId,
+        start: index,
+        headerProduct: null,
+        hasRealUser: false,
+      };
+      groups.push(current);
+    }
+    if (row.kind === "turnHeader") {
+      // 控制轮不占 K：workflow 直接启动、background result 和显式 controlOnly
+      // 都不是用户眼里的产品轮。
+      current.headerProduct =
+        row.executionKind !== "controlOnly" &&
+        row.origin !== "backgroundResult" &&
+        row.origin !== "workflowLaunch";
+    } else if (row.kind === "userInput" && row.origin === "realUser") {
+      current.hasRealUser = true;
+    }
+  }
+
+  const isProductGroup = (group: TurnGroup): boolean =>
+    group.headerProduct ?? group.hasRealUser;
+  const productGroups = groups.filter(isProductGroup);
+  if (productGroups.length === 0) {
+    // 没有产品轮时不能无限保留控制轮；沿用 turnId 计数保证窗口有界。
+    return trimRowsByTurnId(rows, turnLimit);
+  }
+  if (productGroups.length <= turnLimit) return null;
+
+  const firstKeptProduct = productGroups[productGroups.length - turnLimit]!;
+  const cutIndex = firstKeptProduct.start;
+  if (cutIndex === 0) return null;
+  return {
+    window: rows.slice(cutIndex),
+    // “更早的 N 轮”按产品轮计数；控制轮不参与提示数字。
+    removedTurns: productGroups.length - turnLimit,
+  };
+}
+
+/** 旧规则：按 turnId 计数。仅用于没有产品轮的控制型窗口。 */
+function trimRowsByTurnId(
+  rows: readonly ConversationRow[],
+  turnLimit: number,
+): LiveRetentionTrim | null {
   let seenTurns = 0;
   let lastTurnId: string | null = null;
   let cutIndex = 0;

@@ -2269,6 +2269,33 @@ describe("Conversation live retention", () => {
     expect(store.getState().hiddenTurnCount).toBe(3);
   });
 
+  it("重复设置同一 K 会在任务切回/重挂时再裁一次", async () => {
+    await connectWithTurns(5);
+    store.setLiveTurnLimit(3);
+    store.setViewFollowing(false);
+    transport.emit(
+      makeFrame("sub-1", 5, 6, {
+        kind: "deltas",
+        deltas: [
+          { op: "row.appended", row: turnHeaderRow(11, "t6") },
+          { op: "row.appended", row: turnAssistantRow(12, "t6") },
+        ],
+      }),
+    );
+    expect(store.getState().snapshot!.rows.window.map((row) => row.rowId)).toEqual([
+      5, 6, 7, 8, 9, 10, 11, 12,
+    ]);
+
+    // SessionPane 重挂/任务切回时会再次 setLiveTurnLimit(3)；即使 K 没变，
+    // 也必须把 keep-warm 窗口收敛回最近 3 轮。
+    store.setLiveTurnLimit(3);
+
+    expect(store.getState().snapshot!.rows.window.map((row) => row.rowId)).toEqual([
+      7, 8, 9, 10, 11, 12,
+    ]);
+    expect(store.getState().hiddenTurnCount).toBe(3);
+  });
+
   it("rewind 目标在未加载头部时强制 snapshot 重订阅，不在本地清空窗口", async () => {
     await connectWithTurns(5);
     store.setLiveTurnLimit(3);

@@ -6102,6 +6102,12 @@ function formatHudPercent(value: number | null): string {
   return `${(value * 100).toFixed(1)}%`;
 }
 
+function formatHudLatency(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "—";
+  if (value < 1000) return `${Math.round(value)} ms`;
+  return `${(value / 1000).toFixed(1)} s`;
+}
+
 /** 自用 Performance HUD：固定浮层，数据直接来自当前会话 projection。 */
 function PerformanceHud({
   snapshot,
@@ -6204,6 +6210,10 @@ function PerformanceHud({
           },
         )
       : intl.formatMessage({ id: "chat.performanceHud.waiting" });
+  const ttftLabel = intl.formatMessage({ id: "chat.performanceHud.ttft" });
+  const requestLatencyLabel = intl.formatMessage({
+    id: "chat.performanceHud.requestLatency",
+  });
   const collapse = () => setPrefs((current) => ({ ...current, collapsed: !current.collapsed }));
   const close = () => setPrefs((current) => ({ ...current, visible: false }));
 
@@ -6301,7 +6311,7 @@ function PerformanceHud({
             / {windowRateLabel} tok/s
           </span>
           <span className="text-foreground-subtle tabular-nums">
-            {windowLabel} · {formatHudPercent(metrics.contextRatio)}
+            {windowLabel} · {ttftLabel} {formatHudLatency(metrics.lastTimeToFirstContentMs)}
           </span>
         </div>
       ) : (
@@ -6353,6 +6363,52 @@ function PerformanceHud({
             <span className="min-w-0 truncate text-foreground">{metrics.model || "—"}</span>
           </div>
 
+          <div className="space-y-1">
+            <div className="flex items-center justify-between text-[10.5px] text-foreground-subtle">
+              <span>{ttftLabel}</span>
+              <span className="tabular-nums text-foreground">
+                {formatHudLatency(metrics.lastTimeToFirstContentMs)}
+              </span>
+            </div>
+            <div className="flex items-center justify-between text-[10.5px] text-foreground-subtle">
+              <span>{requestLatencyLabel}</span>
+              <span className="tabular-nums text-foreground">
+                {formatHudLatency(metrics.lastRequestDurationMs)}
+              </span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-ui-sm">
+            <div>
+              <div className="text-[10.5px] text-foreground-subtle">
+                {intl.formatMessage({ id: "chat.performanceHud.ttftP50" })}
+              </div>
+              <div className="font-medium tabular-nums">{formatHudLatency(metrics.ttftP50Ms)}</div>
+            </div>
+            <div>
+              <div className="text-[10.5px] text-foreground-subtle">
+                {intl.formatMessage({ id: "chat.performanceHud.ttftP90" })}
+              </div>
+              <div className="font-medium tabular-nums">{formatHudLatency(metrics.ttftP90Ms)}</div>
+            </div>
+            <div>
+              <div className="text-[10.5px] text-foreground-subtle">
+                {intl.formatMessage({ id: "chat.performanceHud.requestP50" })}
+              </div>
+              <div className="font-medium tabular-nums">
+                {formatHudLatency(metrics.requestDurationP50Ms)}
+              </div>
+            </div>
+            <div>
+              <div className="text-[10.5px] text-foreground-subtle">
+                {intl.formatMessage({ id: "chat.performanceHud.requestP90" })}
+              </div>
+              <div className="font-medium tabular-nums">
+                {formatHudLatency(metrics.requestDurationP90Ms)}
+              </div>
+            </div>
+          </div>
+
           <div>
             <div className="flex items-center justify-between text-[10.5px] text-foreground-subtle">
               <span>{intl.formatMessage({ id: "chat.performanceHud.context" })}</span>
@@ -6384,22 +6440,6 @@ function PerformanceHud({
               </div>
               <div className="font-medium tabular-nums">
                 {formatHudCount(metrics.lastTurnOutputTokens)}
-              </div>
-            </div>
-            <div>
-              <div className="text-[10.5px] text-foreground-subtle">
-                {intl.formatMessage({ id: "chat.performanceHud.p50" })}
-              </div>
-              <div className="font-medium tabular-nums">
-                {formatHudRate(metrics.medianCompletedTokensPerSecond)}
-              </div>
-            </div>
-            <div>
-              <div className="text-[10.5px] text-foreground-subtle">
-                {intl.formatMessage({ id: "chat.performanceHud.p90" })}
-              </div>
-              <div className="font-medium tabular-nums">
-                {formatHudRate(metrics.p90CompletedTokensPerSecond)}
               </div>
             </div>
           </div>
