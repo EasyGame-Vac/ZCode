@@ -2868,6 +2868,7 @@ const enUS: Record<string, string> = {
   "chat.history.loadingOlderMessages": "Loading earlier messages...",
   "chat.history.loadOlderMessages": "Load earlier messages",
   "chat.history.openEarlierTurns": "Earlier {count} turns",
+  "chat.history.openEarlier": "Earlier history",
   "chat.history.drawerTitle": "History",
   "chat.history.drawerClose": "Close history",
   "chat.history.drawerEmpty": "No earlier messages",

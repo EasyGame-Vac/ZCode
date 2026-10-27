@@ -484,3 +484,19 @@ CREATE INDEX conversation_turn_session_ordinal_idx
 - turn 内虚拟化。
 - 工具卡 content-addressed LRU 与 highlight/Mermaid worker 化。
 - 导航/分享/搜索完全迁到 catalog/archive（当前历史抽屉已可用，导航仍只列已加载轮）。
+
+### 15.1 端到端验收（2026-10-27）
+
+在隔离的 `~/.zcode-dev-home` 中用生产库副本启动 dev build（会话规模：290 条消息 / 32 个用户轮 / 1,193 个 part）：
+
+- 打开长会话后，主视图最终稳定在 3 个 `data-v4-turn-unit`（首帧因虚拟窗口/overscan 可能短暂出现 5 个），不是全部 32 个用户轮。
+- 顶部出现“更早的历史”；抽屉首屏加载 30 条消息，点击“加载更早消息”后变为 60 条，证明 `beforeMessageId` 向后分页生效。
+- 验收中发现并修复三个真实缺口：
+  - `session/messages` 必须把内部 `MessageWithParts` 经 `mapMessageWithParts` 映射成协议结构，否则 Zod 校验失败。
+  - Host 尾窗本身不足 K 轮时 `hiddenTurnCount` 为 0；历史入口改为 `hiddenTurnCount > 0 || hasOlderRows(snapshot)` 时显示。
+  - 快照和首次 `setLiveTurnLimit` 不能只在 `viewFollowing=true` 时裁剪：恢复的滚动位置或共享 pane 会让 following 长期为 false，窗口停在 9 轮。改为快照与首次设置 K 必定裁剪，只有后续实时帧尊重 following。
+- 性能观测（dev build）：稳态 3 轮 / 约 3.2k DOM / 无 longtask；冷开约 1.1s，长任务集中在 React dev 模式 JSX、DOM `setAttribute`、GC 和虚拟列表测高，未出现 markdown/Shiki/工具 diff 热点。Host tail-first 冷启动（P3b）未落地，仍是冷开成本的主要来源；dev build 本身也明显慢于生产包。
+- 滚动卡顿修复与 A/B（同一 520px 视口，dev build）：
+  - 根因：滚动到顶部会自动 `loadOlder`，把 60 行历史并进 live 窗口并重建整条时间线；同时每次 scroll 都扫全部 `[data-row-id]`、读 `getBoundingClientRect`、写 mask，并且 `setTurnNavigatorViewport` 每像素触发 Timeline 重渲染。
+  - 修复：scroll 派生工作合并到 rAF；navigator 只扫真实用户锚点（`data-turn-query-row`）且仅在 active query/视口高度变化时 setState；主视图禁用滚动自动 `loadOlder`，历史只走只读抽屉。
+  - 结果：修复前 10 轮 / 22,483px 滚动高度 / 最大 839ms 长任务；修复后 2 轮 / 4,656px / 最大 82ms，约 49fps（focus emulation 下）。

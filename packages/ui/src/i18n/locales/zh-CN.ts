@@ -2673,6 +2673,7 @@ const zhCN: Record<string, string> = {
   "chat.history.loadingOlderMessages": "正在加载更早消息...",
   "chat.history.loadOlderMessages": "加载更早消息",
   "chat.history.openEarlierTurns": "更早的 {count} 轮",
+  "chat.history.openEarlier": "更早的历史",
   "chat.history.drawerTitle": "历史记录",
   "chat.history.drawerClose": "关闭历史",
   "chat.history.drawerEmpty": "没有更早的记录",

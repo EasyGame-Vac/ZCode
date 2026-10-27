@@ -5766,16 +5766,19 @@ export function SessionPane({
             compactForRemoteControl && "min-w-0",
           )}
         >
-          {sessionId && state.hiddenTurnCount > 0 ? (
+          {sessionId &&
+          (state.hiddenTurnCount > 0 || (timelineSnapshot && hasOlderRows(timelineSnapshot))) ? (
             <button
               type="button"
               className="absolute left-1/2 top-2 z-20 -translate-x-1/2 rounded-full border border-border/70 bg-background/90 px-3 py-1 text-xs text-muted-foreground shadow-sm backdrop-blur hover:text-foreground"
               onClick={() => setHistoryDrawerOpen(true)}
             >
-              {intl.formatMessage(
-                { id: "chat.history.openEarlierTurns" },
-                { count: state.hiddenTurnCount },
-              )}
+              {state.hiddenTurnCount > 0
+                ? intl.formatMessage(
+                    { id: "chat.history.openEarlierTurns" },
+                    { count: state.hiddenTurnCount },
+                  )
+                : intl.formatMessage({ id: "chat.history.openEarlier" })}
             </button>
           ) : null}
           {sessionId && !compactForRemoteControl ? (
@@ -5933,6 +5936,7 @@ export function SessionPane({
                   onLoadOlder={handleLoadOlder}
                   onLoadAllOlder={handleLoadAllOlder}
                   disableTurnNavigatorAutoHydration
+                  disableAutoLoadOlder
                   onFollowingChange={handleTimelineFollowingChange}
                   turnNavigatorDirectoryRevision={state.turnNavigatorDirectoryRevision}
                   bottomDock={conversationBottomDock}

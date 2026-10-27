@@ -438,7 +438,9 @@ export class ConversationProjectionStore {
   setLiveTurnLimit(turnLimit: number | null): void {
     if (this.liveTurnLimit === turnLimit) return;
     this.liveTurnLimit = turnLimit;
-    if (this.viewFollowing) this.commitLiveRetention();
+    // 首次设置/会话打开时必须收敛窗口；following 只用于后续实时帧，
+    // 避免恢复的滚动位置或共享 pane 把 following 留在 false 导致永不裁剪。
+    this.commitLiveRetention();
   }
 
   getLiveTurnLimit(): number | null {
@@ -828,7 +830,7 @@ export class ConversationProjectionStore {
       // snapshot 是整体替换：hiddenTurnCount 以这份窗口自身被裁掉的轮数为准，
       // 不继承旧窗口的累计值。
       const retention =
-        this.liveTurnLimit !== null && this.viewFollowing
+        this.liveTurnLimit !== null
           ? this.trimSnapshotForLiveWindow(sharedSnapshot)
           : null;
       const snapshot = retention?.snapshot ?? sharedSnapshot;

@@ -303,6 +303,8 @@ export interface ConversationTimelineProps {
   onLoadAllOlder?: () => Promise<ConversationTurnNavigatorHydrationResult>;
   /** 主视图启用 live 保留时禁止宽屏自动补齐全部历史；历史走按需入口。 */
   disableTurnNavigatorAutoHydration?: boolean;
+  /** 主视图启用 live 保留时禁止滚动自动 loadOlder；历史走只读抽屉。 */
+  disableAutoLoadOlder?: boolean;
   /** 视口是否跟随底部；live 保留只在跟随时裁头，避免向上阅读时滚动跳变。 */
   onFollowingChange?: (following: boolean) => void;
   /**
@@ -398,6 +400,7 @@ function ConversationTimelineImpl({
   onLoadOlder,
   onLoadAllOlder,
   disableTurnNavigatorAutoHydration = false,
+  disableAutoLoadOlder = false,
   onFollowingChange,
   turnNavigatorDirectoryRevision = 0,
   bottomDock,
@@ -558,9 +561,13 @@ function ConversationTimelineImpl({
     );
   }, []);
   // loadOlder 相关值经 ref 读取，保持 handleScroll 稳定引用。
-  const loadOlderRef = useRef({ canLoadOlder, loadingOlder, onLoadOlder });
-  loadOlderRef.current = { canLoadOlder, loadingOlder, onLoadOlder };
+  const loadOlderRef = useRef({ canLoadOlder, loadingOlder, onLoadOlder, disableAutoLoadOlder });
+  loadOlderRef.current = { canLoadOlder, loadingOlder, onLoadOlder, disableAutoLoadOlder };
   const followingRef = useRef(initialFollowing());
+  // scroll 事件可能高于 60Hz；把 mask / navigator / scroll memory 的 DOM 读写合并到一帧一次。
+  const scrollSyncFrameRef = useRef<number | null>(null);
+  const scrollSyncElementRef = useRef<HTMLDivElement | null>(null);
+  const saveScrollMemoryOnSyncRef = useRef(false);
   // 回调经 ref 读取：宿主可能传内联函数，不能让它进入 commitFollowing 的依赖。
   const onFollowingChangeRef = useRef(onFollowingChange);
   onFollowingChangeRef.current = onFollowingChange;
@@ -1072,9 +1079,14 @@ function ConversationTimelineImpl({
   const syncTurnNavigatorViewport = useCallback(
     (element: HTMLDivElement) => {
       syncMessageLayerMask(element);
+      // 没有可导航 query 时 navigator 没有可更新的 active 项；不要为一次滚动
+      // 扫描全部 row 并 setState。
+      if (turnNavigatorQueryRowIdsRef.current.size === 0) return;
       const viewportRect = element.getBoundingClientRect();
       const queryPositions: ConversationTurnNavigatorQueryPosition[] = [];
-      for (const rowElement of element.querySelectorAll<HTMLElement>("[data-row-id]")) {
+      // 只扫真实用户消息锚点。过去每次 scroll 都 querySelectorAll("[data-row-id]")
+      // 遍历全部已挂载行，长会话滚动时是主要的主线程成本之一。
+      for (const rowElement of element.querySelectorAll<HTMLElement>("[data-turn-query-row]")) {
         const rowId = Number(rowElement.dataset.rowId);
         if (!Number.isSafeInteger(rowId) || !turnNavigatorQueryRowIdsRef.current.has(rowId)) {
           continue;
@@ -1095,7 +1107,8 @@ function ConversationTimelineImpl({
         }),
       };
       setTurnNavigatorViewport((current) =>
-        current.scrollOffsetPx === nextViewport.scrollOffsetPx &&
+        // scrollOffset 每像素都变；navigator 的滚动位置直接读 virtualizer.scrollOffset，
+        // 这里只在视口高度或 active query 真正变化时换 state，避免每像素重渲染 Timeline。
         current.viewportHeightPx === nextViewport.viewportHeightPx &&
         current.activeQueryRowId === nextViewport.activeQueryRowId
           ? current
@@ -1429,6 +1442,36 @@ function ConversationTimelineImpl({
     ],
   );
 
+  const scheduleScrollDerivedSync = useCallback(
+    (element: HTMLDivElement) => {
+      scrollSyncElementRef.current = element;
+      if (scrollSyncFrameRef.current !== null) return;
+      scrollSyncFrameRef.current = window.requestAnimationFrame(() => {
+        scrollSyncFrameRef.current = null;
+        const current = scrollSyncElementRef.current;
+        scrollSyncElementRef.current = null;
+        if (!current) return;
+        syncTurnNavigatorViewport(current);
+        if (saveScrollMemoryOnSyncRef.current) {
+          saveScrollMemoryOnSyncRef.current = false;
+          saveCurrentScrollMemory();
+        }
+      });
+    },
+    [saveCurrentScrollMemory, syncTurnNavigatorViewport],
+  );
+
+  useEffect(
+    () => () => {
+      if (scrollSyncFrameRef.current !== null) {
+        window.cancelAnimationFrame(scrollSyncFrameRef.current);
+        scrollSyncFrameRef.current = null;
+      }
+      scrollSyncElementRef.current = null;
+    },
+    [],
+  );
+
   const handleScroll = useCallback(() => {
     const element = scrollRef.current;
     if (!element) return;
@@ -1452,7 +1495,7 @@ function ConversationTimelineImpl({
       suppressVirtualizerAdjustmentDuringRestoreRef.current = false;
     }
     lastObservedScrollTopRef.current = element.scrollTop;
-    syncTurnNavigatorViewport(element);
+    scheduleScrollDerivedSync(element);
     const following = resolveFollowingAfterScroll({
       following: followingRef.current,
       source: scrollSource,
@@ -1466,13 +1509,14 @@ function ConversationTimelineImpl({
     if (scrollSource === "user") {
       pendingDetachedScrollRestoreRef.current = null;
       userAdjustedScrollSinceRestoreRef.current = true;
-      saveCurrentScrollMemory();
+      saveScrollMemoryOnSyncRef.current = true;
     }
     // 只在 64px 顶边才补页时，用户会先撞到窗口边界再看到内容跳入；提前两个
     // 视口预取，让桌面和手机 Web 共用的 renderer 在用户抵达边界前完成补页。
     const loadOlder = loadOlderRef.current;
     const triggerPx = historyPrefetchTriggerPx(element.clientHeight);
     if (
+      !loadOlder.disableAutoLoadOlder &&
       shouldTriggerLoadOlder({
         scrollTop: element.scrollTop,
         canLoadOlder: loadOlder.canLoadOlder,
@@ -1503,8 +1547,7 @@ function ConversationTimelineImpl({
   }, [
     commitFollowing,
     getActiveUserScrollIntent,
-    saveCurrentScrollMemory,
-    syncTurnNavigatorViewport,
+    scheduleScrollDerivedSync,
     virtualizer,
   ]);
 

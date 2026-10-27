@@ -5,6 +5,7 @@ import {
 } from "@zcode/shared";
 /* eslint-disable max-lines -- ZCode Protocol 的 session/workspace 方法共享同一个 server context 与 snapshot helpers，迁移期先集中维护。 */
 import { observeSessionDebug } from "./session-debug.js";
+import { mapMessageWithParts } from "./message-mapper.js";
 import {
   TASK_LIST_SESSION_TYPES,
   isTaskListSessionType,
@@ -1968,14 +1969,14 @@ export async function readMessages(context: ZCodeProtocolAgentServerContext, raw
     );
     if (beforeIndex <= 0) return { messages: [] };
     const start = Math.max(0, beforeIndex - (params.limit ?? beforeIndex));
-    return { messages: allMessages.slice(start, beforeIndex) };
+    return { messages: allMessages.slice(start, beforeIndex).map(mapMessageWithParts) };
   }
   const afterMessageIndex = params.afterMessageId
     ? allMessages.findIndex((message) => String(message.info.id) === params.afterMessageId)
     : -1;
   const messages = afterMessageIndex >= 0 ? allMessages.slice(afterMessageIndex + 1) : allMessages;
   return {
-    messages: params.limit ? messages.slice(-params.limit) : messages,
+    messages: (params.limit ? messages.slice(-params.limit) : messages).map(mapMessageWithParts),
   };
 }
 

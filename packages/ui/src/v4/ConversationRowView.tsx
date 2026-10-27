@@ -145,14 +145,17 @@ function RowShell({
   rowId,
   children,
   className = "",
+  turnQueryRow = false,
 }: {
   rowId: number;
   children: React.ReactNode;
   className?: string;
+  turnQueryRow?: boolean;
 }) {
   return (
     <div
       data-row-id={rowId}
+      {...(turnQueryRow ? { "data-turn-query-row": "true" } : {})}
       data-testid={testId(TID_V4_ROW, String(rowId))}
       className={cn(className)}
     >
@@ -1148,7 +1151,11 @@ const SingleUserInputRowView = memo(function SingleUserInputRowView({
 
   if (editing) {
     return (
-      <RowShell rowId={row.rowId} className="flex flex-col items-end">
+      <RowShell
+        rowId={row.rowId}
+        turnQueryRow={row.origin === "realUser"}
+        className="flex flex-col items-end"
+      >
         <ChatPromptEditor
           workspacePath={context.workspacePath}
           taskId={context.sessionId ?? null}
@@ -1295,7 +1302,11 @@ const SingleUserInputRowView = memo(function SingleUserInputRowView({
   }
 
   return (
-    <RowShell rowId={row.rowId} className="group/user-row flex flex-col items-end">
+    <RowShell
+      rowId={row.rowId}
+      turnQueryRow={row.origin === "realUser"}
+      className="group/user-row flex flex-col items-end"
+    >
       {isScheduledAutomationPrompt ? (
         <div
           data-v4-user-input-automation-origin="schedule"

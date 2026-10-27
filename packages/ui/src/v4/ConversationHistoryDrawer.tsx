@@ -28,7 +28,10 @@ function HistoryMessage({ message }: { message: ZCodeMessageWithParts }) {
     .trim();
   const tools = message.parts.filter((part) => part.type === "tool");
   return (
-    <article className="rounded-lg border border-border/60 bg-card/40 px-3 py-2">
+    <article
+      className="rounded-lg border border-border/60 bg-card/40 px-3 py-2"
+      style={{ contentVisibility: "auto", containIntrinsicSize: "auto 180px" }}
+    >
       <div className="mb-1 text-[11px] font-medium text-muted-foreground">
         {role === "user"
           ? intl.formatMessage({ id: "chat.history.drawerUser" })
