@@ -12,7 +12,12 @@ import {
   ZCODE_PERSONAL_PROVIDER_CONFIG_FILE_ENV,
   type ZCodeBuiltinRefreshEvent,
 } from "@zcode/provider-node";
-import { resolveRuntimeZCodeEndpointOrigin, ZCODE_VERSION } from "@zcode/shared";
+import {
+  resolveRuntimeZCodeEndpointOrigin,
+  ZCODE_VERSION,
+  type ZCodeModelOption,
+} from "@zcode/shared";
+import { parseModelPickerValue, type ModelSelection } from "@zcode/shared/model-selection";
 import type { CliEnv } from "./env.js";
 
 export const SEA_ZCODE_BUILTIN_PROVIDER_CONFIG_ASSET_KEY = "zcode-provider/zcode-builtin.json";
@@ -34,6 +39,52 @@ export function createCliProviderRefreshReporter(
         );
       }
     },
+  };
+}
+
+/**
+ * 把 `--model provider/model[$level]` 解析成完整选择。
+ *
+ * Registry 是唯一的候选来源：模型和档位都必须来自当前进程真实可见的 options，
+ * 不能凭字符串拼一个可能在执行时才失败的 Selection。缺省档位取 UI 同款 defaultLevel。
+ */
+export function resolveCliModelSelection(
+  requested: string,
+  options: readonly ZCodeModelOption[],
+): ModelSelection {
+  const normalized = requested.trim();
+  let parsed: ModelSelection;
+  try {
+    parsed = parseModelPickerValue(normalized);
+  } catch {
+    throw new Error(
+      `Invalid --model value "${normalized}". Use provider/model or provider/model$level.`,
+    );
+  }
+
+  const option = options.find(
+    (candidate) =>
+      candidate.ref.providerId === parsed.providerId && candidate.ref.modelId === parsed.modelId,
+  );
+  if (!option) {
+    throw new Error(`Model is not available: ${parsed.providerId}/${parsed.modelId}`);
+  }
+  if (option.disabledReason) {
+    throw new Error(`Model is unavailable: ${option.disabledReason}`);
+  }
+
+  const reasoningLevel = parsed.options?.reasoningLevel ?? option.reasoning?.defaultLevel;
+  const levels = option.reasoning?.levels.map((level) => level.value) ?? [];
+  if (!reasoningLevel || !levels.includes(reasoningLevel)) {
+    throw new Error(
+      `Reasoning effort "${reasoningLevel ?? ""}" is not supported by ${parsed.providerId}/${parsed.modelId}. Available: ${levels.join(", ") || "none"}.`,
+    );
+  }
+
+  return {
+    providerId: parsed.providerId,
+    modelId: parsed.modelId,
+    options: { reasoningLevel },
   };
 }
 

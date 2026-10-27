@@ -1,8 +1,10 @@
 import { ToolSearchModeSchema } from "@zcode/contracts";
+import type { ZCodeModelOption } from "@zcode/shared";
 import {
   STORAGE_MIGRATION_COMMAND,
   storageMigrationReportSchema,
 } from "@zcode/shared/sqlite-migrations";
+import { createCliProviderRefreshReporter } from "./provider-runtime-env.js";
 import { extractDisallowedToolsArgs, parseGlobalArgs } from "./arguments.js";
 import { createNodeLoggerFactory } from "@zcode/adapters";
 import { getRuntimeInfo, type PresentationSurface } from "@zcode/core";
@@ -113,6 +115,9 @@ const globalOptions = (
     json: values.json === true,
     locale,
     ...(values["memory-bench"] === true ? { memoryBench: true } : {}),
+    ...(typeof values.model === "string" && values.model.trim().length > 0
+      ? { model: values.model.trim() }
+      : {}),
     noColor: values["no-color"] === true,
     ...(outputFormat ? { outputFormat } : {}),
     verbose: values.verbose === true,
@@ -628,6 +633,8 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
       return await runLogoutCommand(ctx, options, commandDeps);
     case "commands":
       return await runCommandsCommand(ctx, options, commandDeps, parsed.positionals.slice(1));
+    case "models":
+      return await runModelsCommand(ctx, options, commandDeps, parsed.positionals.slice(1));
     case "plugin":
     case "plugins":
       return await runPluginsCommand(
@@ -658,3 +665,83 @@ export const run = async (ctx: RunContext, deps: RunDependencies = {}): Promise<
       return 1;
   }
 };
+
+const MODELS_USAGE = "Usage: zcode models [--json]";
+
+/** `zcode models`：只读 provider registry，供脚本/精灵选择 `--model`。 */
+async function runModelsCommand(
+  ctx: RunContext,
+  options: GlobalOptions,
+  deps: RunDependencies,
+  args: string[],
+): Promise<number> {
+  if (args.length > 0) {
+    ctx.stderr.write(`${MODELS_USAGE}\n`);
+    return 1;
+  }
+
+  const bootstrap = await loadBootstrapModule();
+  if (!bootstrap.startProcessProviderRegistryRuntime || !bootstrap.listRegistryBackedModels) {
+    ctx.stderr.write("Model registry is unavailable in this build.\n");
+    return 1;
+  }
+
+  let runtime: Awaited<ReturnType<typeof bootstrap.startProcessProviderRegistryRuntime>> | null =
+    null;
+  try {
+    runtime = await bootstrap.startProcessProviderRegistryRuntime(
+      deps.env ?? process.env,
+      deps.skipUserConfig
+        ? {}
+        : {
+            standalone: {
+              ...createCliProviderRefreshReporter(ctx.stderr),
+              ...(deps.userConfigPath ? { legacyCliUserConfigFilePath: deps.userConfigPath } : {}),
+            },
+          },
+    );
+    const models = bootstrap.listRegistryBackedModels(runtime.runtime.registryService);
+    const payload = {
+      ok: true as const,
+      current: runtime.configuredDefaultModelSelection ?? null,
+      models,
+    };
+    ctx.stdout.write(
+      options.json ? `${JSON.stringify(payload, null, 2)}\n` : formatModels(payload.current, models),
+    );
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    ctx.stderr.write(`Unable to list models: ${message}\n`);
+    return 1;
+  } finally {
+    runtime?.dispose();
+  }
+}
+
+function formatModels(current: ZCodeModelOption["ref"] | null, models: ZCodeModelOption[]): string {
+  const currentLevel = current?.options?.reasoningLevel;
+  const lines = [
+    current
+      ? `Default: ${current.providerId}/${current.modelId}${currentLevel ? `$${currentLevel}` : ""}`
+      : "Default: not configured",
+  ];
+
+  if (models.length === 0) {
+    lines.push("No selectable models are configured.");
+    return `${lines.join("\n")}\n`;
+  }
+
+  lines.push("Available models:");
+  for (const model of models) {
+    const id = `${model.ref.providerId}/${model.ref.modelId}`;
+    const levels = model.reasoning?.levels.map((level) => level.value).join(", ") || "none";
+    const provider = model.providerLabel ?? model.ref.providerId;
+    const disabled = model.disabledReason ? ` — ${model.disabledReason}` : "";
+    lines.push(
+      `- ${id} (${model.label}; ${provider}; levels: ${levels}; default: ${model.reasoning?.defaultLevel ?? "none"})${disabled}`,
+    );
+  }
+  lines.push("Use -p --model <provider/model[$level]> to run with a specific model.");
+  return `${lines.join("\n")}\n`;
+}

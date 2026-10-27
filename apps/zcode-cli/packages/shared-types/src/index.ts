@@ -35,6 +35,8 @@ export type GlobalOptions = {
   json: boolean;
   locale?: GlobalLocale;
   memoryBench?: boolean;
+  /** Headless prompt 的模型选择；格式为 provider/model 或 provider/model$level。 */
+  model?: string;
   noColor: boolean;
   outputFormat?: GlobalOutputFormat;
   verbose: boolean;

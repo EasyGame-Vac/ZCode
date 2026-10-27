@@ -30,6 +30,7 @@ export type {
 } from "./custom-commands.js";
 export { createModelAdapter } from "./model-factory.js";
 export type { CreateModelAdapterOptions } from "./model-factory.js";
+export { listRegistryBackedModels } from "./app/provider-registry-selection.js";
 export {
   createDefaultProviderEndpointRoutingPort,
   resolveProcessProviderEndpointRoutingPort,

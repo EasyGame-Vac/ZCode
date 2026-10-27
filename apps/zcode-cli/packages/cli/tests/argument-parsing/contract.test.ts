@@ -35,6 +35,11 @@ test("全局参数保持严格校验且禁用规则不能缺失", () => {
   assert.throws(() => contract.extractDisallowedToolsArgs(["--disallowedTools"]));
 });
 
+test("模型参数保留 provider/model$level 原文，交给 Registry 解析", () => {
+  const parsed = contract.parseGlobalArgs(["--model", "new-provider-2/deepseek-v4.1-flash$high"]);
+  assert.equal(parsed.values.model, "new-provider-2/deepseek-v4.1-flash$high");
+});
+
 test("协议入口识别与普通 prompt 调用保持分离", () => {
   assert.equal(contract.isProtocolServerInvocation(["app-server"]), true);
   assert.equal(contract.isProtocolServerInvocation(["agent-server"]), true);

@@ -20,6 +20,7 @@ export const zhCN: ZCodeCopy = {
   doctor     检查运行时和打包假设
   login [zai|bigmodel]  通过浏览器授权登录
   logout     删除共享的 Z.AI 登录凭据
+  models     列出可选的 provider 模型（\`models [--json]\`）
   plugins    管理插件与市场（\`plugins list|install|uninstall|enable|disable|update|validate|marketplace ...\`；别名 plugin）
   skills     列出本地 skills（\`skills list\`）
   tui        打开终端 UI
@@ -29,6 +30,7 @@ export const zhCN: ZCodeCopy = {
   -h, --help       显示帮助
   -v, --version    显示版本
   -p, --prompt <text>  单次运行 prompt，不打开 TUI
+  --model <provider/model[$level]>  指定本次 prompt 的模型；省略档位时用模型默认档
   --memory-bench   配合 --prompt 开启自动 Memory 提取并等待后退出（需已开启 Memory）
   --browser-use <mode> 启用 Browser Use backend（当前支持：headless）
   --surface <surface>  设置无头 prompt/app-server 的呈现面：terminal 或 desktop

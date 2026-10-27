@@ -1,5 +1,8 @@
 import type { ToolSearchMode } from "@zcode/contracts";
-import { createCliProviderRefreshReporter } from "./provider-runtime-env.js";
+import {
+  createCliProviderRefreshReporter,
+  resolveCliModelSelection,
+} from "./provider-runtime-env.js";
 import { extname } from "node:path";
 import { formatJson, type PresentationSurface } from "@zcode/core";
 import type { RunContext, GlobalOptions } from "@zcode/shared-types";
@@ -231,6 +234,16 @@ export const runPrompt = async (
             },
           },
     );
+    const listModels = bootstrapModule?.listRegistryBackedModels;
+    if (options.model && !listModels) {
+      throw new Error("--model requires the provider registry from the bootstrap module.");
+    }
+    const modelSelection = options.model
+      ? resolveCliModelSelection(
+          options.model,
+          listModels!(providerRegistryRuntime.runtime.registryService),
+        )
+      : undefined;
     const createProviderEndpointRoutingPort =
       deps.createProviderEndpointRoutingPort ??
       bootstrapModule?.createDefaultProviderEndpointRoutingPort;
@@ -260,6 +273,7 @@ export const runPrompt = async (
       resume: sessionId !== undefined,
       runtimeConfig: {
         ...(mode ? { mode } : {}),
+        ...(modelSelection ? { modelSelection } : {}),
         ...(toolDisallowlist ? { toolDisallowlist } : {}),
         toolSearch: { mode: toolsearchMode },
         ...(forceMcs ? { midConversationSystem: { mode: "force" as const } } : {}),
