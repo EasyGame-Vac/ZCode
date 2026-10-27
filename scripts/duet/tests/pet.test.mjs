@@ -5,8 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { classifyEvent, createEventStream, createLineParser } from "../pet/lib/event-parser.mjs";
+import { buildContextHandoff } from "../pet/lib/context-handoff.mjs";
 import { createMessageStore } from "../pet/lib/message-store.mjs";
 import { createModelCatalog } from "../pet/lib/model-catalog.mjs";
+import { createSessionStore } from "../pet/lib/session-store.mjs";
 import { createInitialPetState, reducePetState } from "../pet/lib/state-machine.mjs";
 import { createSupervisorActions } from "../pet/lib/supervisor-actions.mjs";
 import { createSupervisorClient, SupervisorError } from "../pet/lib/supervisor-client.mjs";
@@ -317,6 +319,68 @@ test("message store round-trips visible messages and ignores invalid roles", asy
 
     await store.clear();
     assert.deepEqual(await store.read(), []);
+  } finally {
+    await rm(directory, { force: true, maxRetries: 10, recursive: true, retryDelay: 100 });
+  }
+});
+
+test("context handoff keeps recent messages, drops the current task duplicate and respects the cap", () => {
+  const messages = [
+    { role: "user", text: "很久以前的问题" },
+    { role: "assistant", text: "很久以前的回答" },
+    { role: "user", text: "最近的问题" },
+    { role: "assistant", text: "最近的回答" },
+    { role: "user", text: "当前任务" },
+  ];
+  const prompt = buildContextHandoff({
+    instruction: "你是 K",
+    messages,
+    task: "当前任务",
+    keep: 3,
+    maxChars: 1000,
+  });
+  assert.match(prompt, /你是 K/);
+  assert.match(prompt, /最近的问题/);
+  assert.match(prompt, /最近的回答/);
+  assert.doesNotMatch(prompt, /当前任务\n/);
+  assert.match(prompt, /任务：当前任务/);
+  assert.doesNotMatch(prompt, /很久以前的问题/);
+
+  const capped = buildContextHandoff({
+    instruction: "你是 K",
+    messages: [
+      { role: "user", text: "a".repeat(50) },
+      { role: "assistant", text: "b".repeat(50) },
+    ],
+    task: "继续",
+    maxChars: 60,
+  });
+  assert.ok(capped.length < 300, capped);
+});
+
+test("session store keeps the id and the latest context usage", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "zcode-duet-session-"));
+  try {
+    const store = createSessionStore(join(directory, "pet-session.json"));
+    assert.deepEqual(await store.read(), {
+      sessionId: null,
+      contextUsed: null,
+      contextWindow: null,
+    });
+    await store.update({ sessionId: "sess_1", contextUsed: 1_000, contextWindow: 1_000_000 });
+    assert.deepEqual(await store.read(), {
+      sessionId: "sess_1",
+      contextUsed: 1_000,
+      contextWindow: 1_000_000,
+    });
+    await store.update({ sessionId: "sess_2", contextUsed: null, contextWindow: null });
+    assert.deepEqual(await store.read(), {
+      sessionId: "sess_2",
+      contextUsed: null,
+      contextWindow: null,
+    });
+    await store.clear();
+    assert.equal((await store.read()).sessionId, null);
   } finally {
     await rm(directory, { force: true, maxRetries: 10, recursive: true, retryDelay: 100 });
   }

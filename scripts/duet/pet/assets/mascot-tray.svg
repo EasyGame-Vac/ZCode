@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Source artwork for the Windows/Linux tray icon. The body fills the frame so
+     the face remains readable at 16px; the renderer uses the detailed inline mascot. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="128" height="128">
+  <defs>
+    <linearGradient id="body-gradient" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#8b7cff" />
+      <stop offset="100%" stop-color="#4dd4c6" />
+    </linearGradient>
+  </defs>
+  <line
+    x1="60"
+    y1="26"
+    x2="60"
+    y2="12"
+    stroke="rgba(255,255,255,0.9)"
+    stroke-width="5"
+    stroke-linecap="round"
+  />
+  <circle cx="60" cy="10" r="7" fill="#fff6b0" />
+  <rect x="12" y="26" width="96" height="84" rx="38" fill="url(#body-gradient)" />
+  <circle cx="44" cy="62" r="8" fill="#16141f" />
+  <circle cx="76" cy="62" r="8" fill="#16141f" />
+  <path
+    d="M48 82 Q60 90 72 82"
+    fill="none"
+    stroke="#16141f"
+    stroke-width="4.5"
+    stroke-linecap="round"
+  />
+</svg>

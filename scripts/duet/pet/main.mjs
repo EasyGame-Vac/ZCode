@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   app,
@@ -15,10 +15,12 @@ import {
 } from "electron";
 import { stopProcessTree } from "../lib/process.mjs";
 import { resolveBrainCommand } from "./lib/brain-command.mjs";
+import { buildContextHandoff } from "./lib/context-handoff.mjs";
 import { createEventStream } from "./lib/event-parser.mjs";
 import { readGitHead } from "./lib/git-head.mjs";
 import { createMessageStore } from "./lib/message-store.mjs";
 import { createModelCatalog } from "./lib/model-catalog.mjs";
+import { createSessionStore } from "./lib/session-store.mjs";
 import { createSupervisorActions } from "./lib/supervisor-actions.mjs";
 import { createSupervisorClient } from "./lib/supervisor-client.mjs";
 import { shouldShowTaskPreview } from "./lib/task-preview.mjs";
@@ -37,6 +39,10 @@ const LOG_PATH = join(STATE_DIR, "logs", "k.log");
 const IS_SMOKE = process.env.DUET_PET_SMOKE === "1";
 const K_INSTRUCTION =
   "你是 K，ZCode 的桌面小人。先阅读 scripts/duet/k-prompt.md，并严格遵守其中的约束。";
+// 上下文占用超过 75% 时滚动到新 session；只带最近 20 条可见消息，更早的直接丢弃。
+const CONTEXT_ROTATE_AT = 0.75;
+const CONTEXT_KEEP_MESSAGES = 20;
+const CONTEXT_HANDOFF_MAX_CHARS = 16_000;
 
 let win = null;
 let tray = null;
@@ -81,23 +87,6 @@ async function loadJson(filePath, fallback) {
   } catch {
     return fallback;
   }
-}
-
-async function loadSessionId() {
-  const parsed = await loadJson(SESSION_PATH, null);
-  return typeof parsed?.sessionId === "string" && parsed.sessionId.length > 0
-    ? parsed.sessionId
-    : null;
-}
-
-async function saveSessionId(sessionId) {
-  if (typeof sessionId !== "string" || sessionId.length === 0) return;
-  await mkdir(STATE_DIR, { recursive: true });
-  await writeFile(
-    SESSION_PATH,
-    `${JSON.stringify({ sessionId, updatedAt: new Date().toISOString() }, null, 2)}\n`,
-    "utf8",
-  );
 }
 
 function sendEvent(type, payload) {
@@ -367,9 +356,14 @@ function createWindow() {
   void win.loadFile(join(import.meta.dirname, "renderer", "index.html"));
 }
 
+async function openLog() {
+  const error = await shell.openPath(LOG_PATH);
+  if (error) warn("open log failed:", error);
+}
+
 function createTray() {
   if (IS_SMOKE || process.platform === "darwin") return;
-  const iconPath = join(REPO_ROOT, "public", "icon_512@2x.png");
+  const iconPath = join(import.meta.dirname, "assets", "mascot-tray.png");
   try {
     const image = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
     const shortcutLabel = formatShortcutLabel(petConfig.shortcut ?? "CommandOrControl+Shift+Z");
@@ -389,6 +383,12 @@ function createTray() {
           label: "新会话",
           click: () => {
             void clearSession();
+          },
+        },
+        {
+          label: "打开日志",
+          click: () => {
+            void openLog();
           },
         },
         {
@@ -424,6 +424,7 @@ const brainCommand = () =>
 
 const modelCatalog = createModelCatalog({ resolveCommand: brainCommand });
 const petMessages = createMessageStore(PET_MESSAGES_PATH);
+const sessionStore = createSessionStore(SESSION_PATH);
 
 async function setModel(model) {
   const next = typeof model === "string" ? model.trim() : "";
@@ -541,8 +542,22 @@ async function sendMessage(text) {
   let child = null;
   let current = null;
   try {
-    const sessionId = await loadSessionId();
-    const prompt = sessionId ? trimmed : `${K_INSTRUCTION}\n\n任务：${trimmed}`;
+    const meta = await sessionStore.read();
+    const contextRatio =
+      meta.contextUsed !== null && meta.contextWindow ? meta.contextUsed / meta.contextWindow : 0;
+    const rotate = Boolean(meta.sessionId) && contextRatio >= CONTEXT_ROTATE_AT;
+    const sessionId = rotate ? null : meta.sessionId;
+    const prompt = rotate
+      ? buildContextHandoff({
+          instruction: K_INSTRUCTION,
+          messages: await petMessages.read(),
+          task: trimmed,
+          keep: CONTEXT_KEEP_MESSAGES,
+          maxChars: CONTEXT_HANDOFF_MAX_CHARS,
+        })
+      : sessionId
+        ? trimmed
+        : `${K_INSTRUCTION}\n\n任务：${trimmed}`;
     const base = brainCommand();
     const args = [
       ...base.args,
@@ -573,16 +588,33 @@ async function sendMessage(text) {
     brainStarting = false;
     let result = null;
     let stderr = "";
+    if (rotate) {
+      sendEvent("context-rotated", { keep: CONTEXT_KEEP_MESSAGES });
+    }
     sendEvent("brain-start", { sessionId });
 
     const stream = createEventStream({
       onEvent: (event) => {
         if (event.kind === "result") {
           result = event;
-          if (event.sessionId) void saveSessionId(event.sessionId);
+          if (event.sessionId) {
+            void sessionStore.update({
+              sessionId: event.sessionId,
+              ...(Number.isFinite(event.projection?.contextUsed)
+                ? { contextUsed: event.projection.contextUsed }
+                : {}),
+              ...(Number.isFinite(event.projection?.contextWindow)
+                ? { contextWindow: event.projection.contextWindow }
+                : {}),
+            });
+          }
         }
         if (event.kind === "session" && event.sessionId) {
-          void saveSessionId(event.sessionId);
+          // 滚动到新 session 时清掉旧 session 的上下文占用，避免下一轮再次误判。
+          void sessionStore.update({
+            sessionId: event.sessionId,
+            ...(rotate ? { contextUsed: null, contextWindow: null } : {}),
+          });
         }
         sendEvent("brain-event", event);
       },
@@ -648,7 +680,7 @@ async function cancelBrain() {
 }
 
 async function clearSession() {
-  await rm(SESSION_PATH, { force: true });
+  await sessionStore.clear();
   await petMessages.clear();
   sendEvent("session-reset", {});
 }
@@ -679,7 +711,7 @@ function registerIpc() {
         shortcut: petConfig.shortcut ?? "CommandOrControl+Shift+Z",
         window: windowSizes,
       },
-      sessionId: await loadSessionId(),
+      sessionId: (await sessionStore.read()).sessionId,
       model: petState.model ?? null,
       messages: await petMessages.read(),
       status,
@@ -738,10 +770,6 @@ function registerIpc() {
   ipcMain.handle("pet:hide", async () => {
     win?.hide();
     return { ok: true };
-  });
-  ipcMain.handle("pet:open-log", async () => {
-    const error = await shell.openPath(LOG_PATH);
-    return { ok: error.length === 0, error: error || null };
   });
 }
 

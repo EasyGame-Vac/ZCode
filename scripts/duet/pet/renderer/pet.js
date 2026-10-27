@@ -15,7 +15,6 @@ const previewFiles = document.querySelector("#preview-files");
 const previewWarning = document.querySelector("#preview-warning");
 const actionsEl = document.querySelector("#actions");
 const activateButton = document.querySelector("#activate-button");
-const logButton = document.querySelector("#log-button");
 const composer = document.querySelector("#composer");
 const input = document.querySelector("#input");
 const sendButton = document.querySelector("#send-button");
@@ -410,6 +409,12 @@ function handleEvent(envelope) {
     case "model-changed":
       applyModelValue(payload?.model);
       break;
+    case "context-rotated":
+      dispatch({
+        type: "activity",
+        text: `已丢弃较早上下文，保留最近 ${payload?.keep ?? 20} 条消息。`,
+      });
+      break;
     case "session-reset":
       dispatch({ type: "reset" });
       activityExpanded = false;
@@ -477,17 +482,6 @@ async function activate() {
     }
   } catch (error) {
     dispatch({ type: "assistant-error", text: errorMessage(error) });
-  }
-}
-
-async function openLog() {
-  try {
-    const result = await api.openLog();
-    if (!result?.ok) {
-      dispatch({ type: "activity", text: `打开日志失败：${result?.error ?? "unknown"}` });
-    }
-  } catch (error) {
-    dispatch({ type: "activity", text: `打开日志失败：${errorMessage(error)}` });
   }
 }
 
@@ -687,9 +681,6 @@ function bindUi() {
   });
   activateButton.addEventListener("click", () => {
     void activate();
-  });
-  logButton.addEventListener("click", () => {
-    void openLog();
   });
   resetButton.addEventListener("click", () => {
     void resetSession();

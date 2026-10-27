@@ -13,7 +13,6 @@ contextBridge.exposeInMainWorld("duetPet", {
   dragStart: () => ipcRenderer.send("pet:drag-start"),
   dragEnd: () => ipcRenderer.send("pet:drag-end"),
   hide: () => ipcRenderer.invoke("pet:hide"),
-  openLog: () => ipcRenderer.invoke("pet:open-log"),
   onEvent: (callback) => {
     if (typeof callback !== "function") return () => {};
     const listener = (_event, payload) => {
