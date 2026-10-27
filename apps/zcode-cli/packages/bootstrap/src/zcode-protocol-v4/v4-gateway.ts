@@ -28,6 +28,7 @@ import type {
   DynamicWorkflowRunEventsResult,
   DynamicWorkflowRunSessionSummary,
   MessageWithParts,
+  ModelRequestTimingRecord,
   SessionEvent,
   TargetChangedPayload,
   TurnId,
@@ -191,6 +192,8 @@ interface PersistedEventsLoadResult {
   sourceEventSeq?: number;
   /** 与本次历史事件使用同一容量的种子；null 表示已查询但没有历史水位。 */
   usageSeed?: SessionUsageSeed | null;
+  /** 冷恢复回填 HUD 延迟：最近完成主链路请求的 durable 耗时事实。 */
+  turnLatencySeed?: ModelRequestTimingRecord[];
 }
 
 export type V4GatewayErrorContext = Record<string, unknown>;
@@ -3356,6 +3359,9 @@ export class ConversationV4Gateway {
           sessionId,
         }),
     });
+    if (loaded.turnLatencySeed !== undefined) {
+      publisher.seedTurnLatency(loaded.turnLatencySeed);
+    }
     if (loaded.sharedContextImport) {
       publisher.seedSharedContextImport(loaded.sharedContextImport);
     }

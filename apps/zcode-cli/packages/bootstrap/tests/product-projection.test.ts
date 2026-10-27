@@ -3,6 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type {
   EventId,
+  MessageId,
   SessionEvent,
   SessionEventType as SessionEventTypeUnion,
   SessionId,
@@ -163,6 +164,24 @@ describe("ProductProjection 黄金测试（L1）", () => {
       },
       { turnId: "turn-1", timestampMs: 1_700_000_003_000 },
     );
+    log.push(
+      SessionEventType.ModelNetworkStatus,
+      {
+        type: "model_request_completed",
+        requestId: "request-latency",
+        providerId: "provider-test",
+        modelId: "model-test",
+        transport: "sse",
+        attempt: 1,
+        maxAttempts: 1,
+        durationMs: 12_000,
+        timeToFirstContentMs: 9_300,
+        timeToFirstTextMs: 9_500,
+        streamMaxIdleMs: 800,
+        streamStallCount: 1,
+      },
+      { turnId: "turn-1", timestampMs: 1_700_000_003_500 },
+    );
 
     const snapshot = runAll(log.events).projection.getSnapshot();
     const header = snapshot.rows.window.find((row) => row.kind === "turnHeader");
@@ -171,6 +190,141 @@ describe("ProductProjection 黄金测试（L1）", () => {
       outputTokens: 100,
       outputTokensPerSecond: 50,
       modelOutputDurationMs: 2_000,
+      lastRequestDurationMs: 12_000,
+      timeToFirstContentMs: 9_300,
+      timeToFirstTextMs: 9_500,
+      streamMaxIdleMs: 800,
+      streamStallCount: 1,
+    });
+  });
+
+  it("keeps request latency after TurnComplete so a replayed session still has latency samples", () => {
+    const log = new EventLog();
+    basicTurnEvents(log);
+    // 重启后按持久事件回放时，Turn 已经收口（isRunning=false）才轮到完成事件；
+    // 延迟是终态事实，不能因运行态 guard 被丢掉。
+    log.push(
+      SessionEventType.ModelNetworkStatus,
+      {
+        type: "model_request_completed",
+        requestId: "request-late",
+        providerId: "provider-test",
+        modelId: "model-test",
+        transport: "sse",
+        attempt: 1,
+        maxAttempts: 1,
+        durationMs: 12_000,
+        timeToFirstContentMs: 9_300,
+        timeToFirstTextMs: 9_500,
+        streamMaxIdleMs: 800,
+        streamStallCount: 1,
+      },
+      { turnId: "turn-1", timestampMs: 1_700_000_010_000 },
+    );
+
+    const { deltasPerEvent, projection } = runAll(log.events);
+    expect(deltasPerEvent.at(-1)).toContainEqual(expect.objectContaining({ op: "row.upserted" }));
+    const header = projection.getSnapshot().rows.window.find((row) => row.kind === "turnHeader");
+    expect(header).toMatchObject({
+      lastRequestDurationMs: 12_000,
+      timeToFirstContentMs: 9_300,
+      timeToFirstTextMs: 9_500,
+      streamMaxIdleMs: 800,
+      streamStallCount: 1,
+    });
+  });
+
+  it("seeds cold-hydration latency from durable request timings without overriding live facts", () => {
+    const log = new EventLog();
+    basicTurnEvents(log);
+    const { projection } = runAll(log.events);
+
+    projection.seedTurnLatency([
+      {
+        turnID: "turn-1" as TurnId,
+        startedAt: 1_700_000_006_000,
+        durationMs: 12_000,
+        timeToFirstTokenMs: 9_300,
+      },
+    ]);
+    const seeded = projection.getSnapshot().rows.window.find((row) => row.kind === "turnHeader");
+    expect(seeded).toMatchObject({
+      lastRequestDurationMs: 12_000,
+      timeToFirstContentMs: 9_300,
+      timeToFirstTextMs: 9_300,
+    });
+
+    // live 事实优先：已有字段不被更旧/更晚的种子覆盖。
+    projection.seedTurnLatency([
+      {
+        turnID: "turn-1" as TurnId,
+        startedAt: 1_700_000_009_000,
+        durationMs: 30_000,
+        timeToFirstTokenMs: 20_000,
+      },
+      {
+        turnID: "turn-missing" as TurnId,
+        startedAt: 1_700_000_009_000,
+        durationMs: 99_000,
+      },
+    ]);
+    const after = projection.getSnapshot().rows.window.find((row) => row.kind === "turnHeader");
+    expect(after).toMatchObject({
+      lastRequestDurationMs: 12_000,
+      timeToFirstContentMs: 9_300,
+      timeToFirstTextMs: 9_300,
+    });
+  });
+
+  it("matches cold-hydration latency by durable message id when the header turnId is synthetic", () => {
+    const log = new EventLog();
+    log.push(SessionEventType.SessionCreated, { mode: "default", contextWindow: 200_000 });
+    log.push(
+      SessionEventType.TurnStarted,
+      { turnNumber: 1, input: "hi", messageId: "user-1" },
+      { turnId: "hydrate-turn-1" },
+    );
+    log.push(
+      SessionEventType.ModelStreaming,
+      { kind: "text_start", delta: "", done: false },
+      { turnId: "hydrate-turn-1" },
+    );
+    log.push(
+      SessionEventType.ModelStreaming,
+      { kind: "text_delta", delta: "hi", done: false },
+      { turnId: "hydrate-turn-1" },
+    );
+    log.push(
+      SessionEventType.ModelComplete,
+      {
+        content: "hi",
+        stopReason: "end_turn",
+        querySource: "main_turn",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      },
+      { turnId: "hydrate-turn-1" },
+    );
+    log.push(
+      SessionEventType.TurnComplete,
+      { response: "hi", tokenCount: 5, toolCallCount: 0, duration: 100, resultType: "success" },
+      { turnId: "hydrate-turn-1" },
+    );
+    const { projection } = runAll(log.events);
+
+    projection.seedTurnLatency([
+      {
+        turnID: "turn-persisted" as TurnId,
+        parentUserMessageID: "user-1" as MessageId,
+        startedAt: 1_700_000_006_000,
+        durationMs: 7_000,
+        timeToFirstTokenMs: 1_200,
+      },
+    ]);
+
+    const header = projection.getSnapshot().rows.window.find((row) => row.kind === "turnHeader");
+    expect(header).toMatchObject({
+      lastRequestDurationMs: 7_000,
+      timeToFirstContentMs: 1_200,
     });
   });
 

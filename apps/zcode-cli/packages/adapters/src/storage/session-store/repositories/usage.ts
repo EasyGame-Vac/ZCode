@@ -8,8 +8,12 @@ import type {
   AppUsageToolRow,
   TaskUsageQueryInput,
   TaskUsageQueryResult,
+  ModelRequestTimingRecord,
   ModelUsageRecord,
+  MessageId,
+  SessionId,
   ToolUsageRecord,
+  TurnId,
   TurnUsageRecord,
 } from "@zcode/contracts";
 import { encodeJson } from "../json.js";
@@ -585,6 +589,53 @@ export async function queryAppUsage(
       totalTokens: Number(d.totalTokens),
     })),
   };
+}
+
+export async function queryRecentModelRequestTimings(
+  db: DatabaseSync,
+  input: { sessionID: SessionId; limit?: number },
+): Promise<ModelRequestTimingRecord[]> {
+  const limit = Math.max(1, Math.min(500, Math.trunc(input.limit ?? 200)));
+  const rows = db
+    .prepare(
+      `select
+         turn_id as turnID,
+         assistant_message_id as assistantMessageID,
+         parent_user_message_id as parentUserMessageID,
+         started_at as startedAt,
+         duration_ms as durationMs,
+         time_to_first_token_ms as timeToFirstTokenMs
+       from model_usage
+       where session_id = ?
+         and query_source = 'main_turn'
+         and status = 'completed'
+         and turn_id is not null
+         and duration_ms is not null
+       order by started_at desc, id desc
+       limit ?`,
+    )
+    .all(input.sessionID, limit) as Array<{
+    turnID: string;
+    assistantMessageID: string | null;
+    parentUserMessageID: string | null;
+    startedAt: number;
+    durationMs: number;
+    timeToFirstTokenMs: number | null;
+  }>;
+  return rows.map((row) => ({
+    turnID: row.turnID as TurnId,
+    ...(row.assistantMessageID !== null
+      ? { assistantMessageID: row.assistantMessageID as MessageId }
+      : {}),
+    ...(row.parentUserMessageID !== null
+      ? { parentUserMessageID: row.parentUserMessageID as MessageId }
+      : {}),
+    startedAt: Number(row.startedAt),
+    durationMs: Math.max(0, Number(row.durationMs)),
+    ...(typeof row.timeToFirstTokenMs === "number" && Number.isFinite(row.timeToFirstTokenMs)
+      ? { timeToFirstTokenMs: Math.max(0, row.timeToFirstTokenMs) }
+      : {}),
+  }));
 }
 
 export async function queryTaskUsage(

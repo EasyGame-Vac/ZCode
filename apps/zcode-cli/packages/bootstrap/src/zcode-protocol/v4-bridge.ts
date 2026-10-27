@@ -84,6 +84,7 @@ import type {
   GoalStatus,
   MessageId,
   MessageWithParts,
+  ModelRequestTimingRecord,
   SessionEvent,
   SessionEventStorePort,
   SessionId,
@@ -2107,6 +2108,22 @@ export function createConversationV4Gateway(
           log?.debug("v4 hydrate merged duplicate cold facts", fields);
         }
       }
+      // 延迟只在内存 eventStore 的 ModelNetworkStatus 里，进程重启后会被淘汰；
+      // model_usage 是 durable 事实，冷恢复用它回填 HUD 的请求耗时。
+      const turnLatencySeed: ModelRequestTimingRecord[] | undefined =
+        store?.queryRecentModelRequestTimings === undefined
+          ? undefined
+          : await store
+              .queryRecentModelRequestTimings({ sessionID: sessionId as SessionId, limit: 200 })
+              .catch((error: unknown) => {
+                context.logger?.warn("v4 hydrate model request timings read failed", {
+                  error: error instanceof Error ? error.message : String(error),
+                  event: "zcode_protocol.v4.hydrate_model_request_timings_failed",
+                  module: "bootstrap.zcode_protocol",
+                  sessionId,
+                });
+                return undefined;
+              });
       // transcript 可恢复 Agent row，却不能证明 child session 已经落库。
       // 这里在 gateway 的 raw-event buffer 补回前生成校验种子，既排除旧幽灵引用，
       // 又避免异步查询覆盖 seed 之后新到达的 live spawn/stop。
@@ -2119,6 +2136,7 @@ export function createConversationV4Gateway(
         events: merged.events,
         // 与合成事件共用本次查询结果；不在后续回填阶段重新读取另一份容量。
         usageSeed,
+        ...(turnLatencySeed === undefined ? {} : { turnLatencySeed }),
         // gateway 旧字段名仍叫 synthesized；这里表示投影已由 durable
         // transcript 重物化，需替换 ingest 抢先建的 cold publisher。
         synthesized: merged.usedDurableTranscript,

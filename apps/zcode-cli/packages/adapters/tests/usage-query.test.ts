@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  createMessageId,
   createProjectId,
   createSessionId,
   createToolCallId,
@@ -400,6 +401,94 @@ describe("queryTaskUsage", () => {
           main_turn: 95,
         },
       });
+    } finally {
+      store.close();
+      await rm(tempRoot, { force: true, recursive: true });
+    }
+  });
+});
+
+describe("queryRecentModelRequestTimings", () => {
+  it("returns completed main-turn timings newest first and excludes other sources/statuses", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "zcode-request-timings-"));
+    const dbPath = join(tempRoot, "session.sqlite");
+    const store = await createSqliteSessionStore({ dbPath });
+    const sessionID = createSessionId("timings");
+    const otherSessionID = createSessionId("timings-other");
+    const turnID = createTurnId("timings-turn");
+    try {
+      for (const id of [sessionID, otherSessionID]) {
+        await store.createSession({
+          id,
+          projectID: createProjectId(`project-${id}`),
+          slug: String(id),
+          directory: tempRoot,
+          title: String(id),
+          version: "0.1.0",
+        });
+      }
+      const usage = (
+        id: string,
+        startedAt: number,
+        options: {
+          querySource?: string;
+          status?: "completed" | "error";
+          durationMs?: number;
+          timeToFirstTokenMs?: number;
+          sessionID?: typeof sessionID;
+        } = {},
+      ) => ({
+        id,
+        logicalRequestId: `${id}-request`,
+        sessionID: options.sessionID ?? sessionID,
+        turnID,
+        querySource: options.querySource ?? "main_turn",
+        providerId: "p",
+        modelId: "model-a",
+        status: options.status ?? ("completed" as const),
+        startedAt,
+        ...(options.durationMs === undefined ? {} : { durationMs: options.durationMs }),
+        ...(options.timeToFirstTokenMs === undefined
+          ? {}
+          : { timeToFirstTokenMs: options.timeToFirstTokenMs }),
+      });
+      const now = 1_900_000_000_000;
+      await store.recordModelUsage(
+        usage("old", now, { durationMs: 5_000, timeToFirstTokenMs: 900 }),
+      );
+      await store.recordModelUsage({
+        ...usage("new", now + 1, { durationMs: 8_000, timeToFirstTokenMs: 1_200 }),
+        parentUserMessageID: createMessageId("user-1"),
+      });
+      await store.recordModelUsage(
+        usage("failed", now + 2, { status: "error", durationMs: 1 }),
+      );
+      await store.recordModelUsage(
+        usage("subagent", now + 3, { querySource: "subagent", durationMs: 1 }),
+      );
+      await store.recordModelUsage(
+        usage("other-session", now + 4, {
+          durationMs: 1,
+          sessionID: otherSessionID,
+        }),
+      );
+
+      expect(await store.queryRecentModelRequestTimings({ sessionID, limit: 10 })).toEqual([
+        {
+          turnID,
+          parentUserMessageID: createMessageId("user-1"),
+          startedAt: now + 1,
+          durationMs: 8_000,
+          timeToFirstTokenMs: 1_200,
+        },
+        {
+          turnID,
+          startedAt: now,
+          durationMs: 5_000,
+          timeToFirstTokenMs: 900,
+        },
+      ]);
+      expect(await store.queryRecentModelRequestTimings({ sessionID, limit: 1 })).toHaveLength(1);
     } finally {
       store.close();
       await rm(tempRoot, { force: true, recursive: true });

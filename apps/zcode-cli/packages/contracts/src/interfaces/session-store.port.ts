@@ -930,6 +930,17 @@ export interface ModelUsageRecord {
   providerMetadata?: unknown;
 }
 
+/** Performance HUD 冷恢复种子：一次已完成主链路请求的耗时事实。 */
+export interface ModelRequestTimingRecord {
+  turnID: TurnId;
+  /** 冷恢复的 header turnId 是 hydrate-turn-N；用消息 ID 才能对回真实 turn。 */
+  assistantMessageID?: MessageId;
+  parentUserMessageID?: MessageId;
+  startedAt: number;
+  durationMs: number;
+  timeToFirstTokenMs?: number;
+}
+
 export interface TurnUsageRecord {
   sessionID: SessionId;
   turnID: TurnId;
@@ -1138,6 +1149,14 @@ export interface SessionStorePort {
     messageID: MessageId;
   }): Promise<MessageWithParts | null>;
   messages(input: { sessionID: SessionId }): Promise<MessageWithParts[]>;
+  /**
+   * 冷恢复回填 Performance HUD：按 started_at 倒序返回最近完成的主链路请求耗时。
+   * 只读展示事实，不参与计费；旧宿主可不实现。
+   */
+  queryRecentModelRequestTimings?(input: {
+    sessionID: SessionId;
+    limit?: number;
+  }): Promise<ModelRequestTimingRecord[]>;
   saveSessionEntry?(input: SessionEntryInfo): Promise<void>;
   sessionEntries?(input: {
     sessionID: SessionId;

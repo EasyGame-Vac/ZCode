@@ -10,7 +10,7 @@
 //   因此「snapshot(W)+续流 ≡ 全量重放」黄金测试可直接覆盖恢复路径。
 // - 重订阅 = 替换：同 connectionId 重复 subscribe 即作废旧订阅并清其
 //   flush buffer，旧 subscriptionId 不再产帧，客户端按 subId 丢弃旧代际帧。
-import { SessionEventType, type SessionEvent } from "@zcode/contracts";
+import { SessionEventType, type ModelRequestTimingRecord, type SessionEvent } from "@zcode/contracts";
 import type {
   CommandEnvelope,
   ConversationDelta,
@@ -334,6 +334,12 @@ export class ConversationTopicPublisher {
   /** cold hydration 的 store-verified subagent manifest，不产 delta。 */
   seedSubagents(seed: SessionSubagentsSeed): void {
     this.projection.seedSubagents(seed);
+    this.wireSnapshotBytesUpperBound = this.measureWireSnapshotBytes(this.getWireSnapshot());
+  }
+
+  /** 冷恢复用 durable model_usage 回填 turn header 的请求耗时；live 值优先。 */
+  seedTurnLatency(entries: readonly ModelRequestTimingRecord[]): void {
+    this.projection.seedTurnLatency(entries);
     this.wireSnapshotBytesUpperBound = this.measureWireSnapshotBytes(this.getWireSnapshot());
   }
 

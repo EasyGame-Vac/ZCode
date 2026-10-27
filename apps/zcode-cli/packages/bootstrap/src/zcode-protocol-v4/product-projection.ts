@@ -15,6 +15,7 @@ import type {
   HookRunLifecyclePayload,
   ModelCompletePayload,
   ModelNetworkStatusPayload,
+  ModelRequestTimingRecord,
   ModelSelectedPayload,
   TurnExecutionModelFallbackPayload,
   ModelStreamingPayload,
@@ -777,6 +778,69 @@ export class ProductProjection {
         running,
         endedTotal: Math.max(0, childSessionIds.length - running.length),
       },
+    };
+  }
+
+  /**
+   * 冷恢复用 durable model_usage 回填延迟。ModelNetworkStatus 只活在内存 eventStore，
+   * 进程重启后会被淘汰；这里按 turn header 的 turnId 补最近一次请求耗时，已有 live
+   * 字段时不覆盖。header 已滚出窗口或属于 split turn 时静默跳过。
+   */
+  seedTurnLatency(entries: readonly ModelRequestTimingRecord[]): void {
+    // 冷恢复 header 的 turnId 是 hydrate-turn-N，和 model_usage.turn_id 不同；
+    // 用持久消息 ID 反查当前投影里的 turn，找不到才退回 turnId（live/同源场景）。
+    const turnIdByMessageId = new Map<string, string>();
+    for (const [rowId, messageId] of this.messageIdByRowId) {
+      const row = this.findRow(rowId);
+      if (row !== undefined) turnIdByMessageId.set(String(messageId), row.turnId);
+    }
+    const latestByTurn = new Map<string, ModelRequestTimingRecord>();
+    for (const entry of entries) {
+      if (!Number.isFinite(entry.durationMs) || entry.durationMs < 0) continue;
+      const key =
+        (entry.parentUserMessageID !== undefined
+          ? turnIdByMessageId.get(String(entry.parentUserMessageID))
+          : undefined) ??
+        (entry.assistantMessageID !== undefined
+          ? turnIdByMessageId.get(String(entry.assistantMessageID))
+          : undefined) ??
+        String(entry.turnID);
+      const current = latestByTurn.get(key);
+      if (current === undefined || entry.startedAt >= current.startedAt) {
+        latestByTurn.set(key, entry);
+      }
+    }
+    if (latestByTurn.size === 0) return;
+    let changed = false;
+    const rows = this.snapshot.rows.window.map((row) => {
+      if (row.kind !== "turnHeader") return row;
+      const timing = latestByTurn.get(row.turnId);
+      if (timing === undefined) return row;
+      const nextTtft = row.timeToFirstContentMs ?? timing.timeToFirstTokenMs;
+      const nextDuration = row.lastRequestDurationMs ?? timing.durationMs;
+      if (
+        nextTtft === row.timeToFirstContentMs &&
+        nextDuration === row.lastRequestDurationMs
+      ) {
+        return row;
+      }
+      changed = true;
+      return {
+        ...row,
+        lastRequestDurationMs: nextDuration,
+        ...(nextTtft !== undefined
+          ? {
+              timeToFirstContentMs: nextTtft,
+              timeToFirstTextMs: row.timeToFirstTextMs ?? nextTtft,
+            }
+          : {}),
+      };
+    });
+    if (!changed) return;
+    // 只替换行内容、不改 rowId/顺序，rowIndexById 仍然有效。
+    this.snapshot = {
+      ...this.snapshot,
+      rows: { ...this.snapshot.rows, window: rows },
     };
   }
 
@@ -2484,8 +2548,16 @@ export class ProductProjection {
   // ── 流式输出 ──
 
   private onModelNetworkStatus(event: SessionEvent): ConversationDelta[] {
-    if (!this.acceptsActiveModelEvent(event)) return [];
     const payload = event.payload as ModelNetworkStatusPayload;
+    // 延迟是请求终态事实，不属于运行中的 UI 状态：历史回放、迟到完成或投影晚于
+    // TurnStarted 建立时 isRunning 可能已经为 false。若和重试标签共用运行态 guard，
+    // 重启恢复后的会话会保留 TPS 却永远丢失全部延迟样本。
+    const active = this.acceptsActiveModelEvent(event);
+    const completedLatencyDeltas =
+      payload.type === "model_request_completed" && (active || event.turnId !== undefined)
+        ? this.projectRequestLatency(event, payload)
+        : [];
+    if (!active) return completedLatencyDeltas;
     if (
       (payload.querySource === undefined || payload.querySource === "main_turn") &&
       (payload.type === "model_request_completed" || payload.type === "model_request_failed") &&
@@ -2531,7 +2603,7 @@ export class ProductProjection {
         // 保持当前状态，等首个有效 text/reasoning/tool 进展再清理，避免标签闪退。
         return positiveInteger(payload.attempt, 1) <= 1 ? this.setApiRetry(null) : [];
       case "model_request_completed":
-        return this.setApiRetry(null);
+        return [...this.setApiRetry(null), ...completedLatencyDeltas];
       case "model_request_failed":
         return payload.retryable ? [] : this.setApiRetry(null);
       case "model_stream_stalled":
@@ -2545,6 +2617,40 @@ export class ProductProjection {
       case "model_request_observation":
         return [];
     }
+  }
+
+  /**
+   * 把一次已完成请求的耗时写到它所属 turn header。查表按事件自己的 turnId，迟到事件只会
+   * 更新旧 turn，不影响当前输入栏；header 已滚出窗口时静默跳过。
+   */
+  private projectRequestLatency(
+    event: SessionEvent,
+    payload: ModelNetworkStatusPayload,
+  ): ConversationDelta[] {
+    if (payload.type !== "model_request_completed") return [];
+    // 延迟只投影主链路；请求开始/首内容/总耗时都由 adapter 精确观测，不在 UI 重算。
+    if (payload.querySource !== undefined && payload.querySource !== "main_turn") return [];
+    if (payload.durationMs === undefined) return [];
+    const turnId = this.turnIdOf(event);
+    const headerRowId = this.turnHeaderRowIdByTurnId.get(turnId);
+    const headerRow = headerRowId !== undefined ? this.findRow(headerRowId) : undefined;
+    if (headerRow?.kind !== "turnHeader") return [];
+    const timing = {
+      lastRequestDurationMs: payload.durationMs,
+      ...(payload.timeToFirstContentMs !== undefined
+        ? { timeToFirstContentMs: payload.timeToFirstContentMs }
+        : {}),
+      ...(payload.timeToFirstTextMs !== undefined
+        ? { timeToFirstTextMs: payload.timeToFirstTextMs }
+        : {}),
+      ...(payload.streamMaxIdleMs !== undefined
+        ? { streamMaxIdleMs: payload.streamMaxIdleMs }
+        : {}),
+      ...(payload.streamStallCount !== undefined
+        ? { streamStallCount: payload.streamStallCount }
+        : {}),
+    };
+    return [{ op: "row.upserted", row: { ...headerRow, ...timing } }];
   }
 
   private onStreamRecoveryStarted(event: SessionEvent): ConversationDelta[] {

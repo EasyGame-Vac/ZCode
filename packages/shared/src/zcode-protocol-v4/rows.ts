@@ -96,6 +96,14 @@ export const turnHeaderRowSchema = z.object({
   // 当前 turn 内主链路模型步骤的累计输出时长（首个输出 → ModelComplete）。
   // 用于滚动窗口加权 TPS：Σ outputTokens ÷ Σ modelOutputDurationMs。
   modelOutputDurationMs: z.number().nonnegative().optional(),
+  // 最近一次主链路模型请求的端到端耗时（请求开始 → model_request_completed）。
+  lastRequestDurationMs: z.number().nonnegative().optional(),
+  // 最近一次主链路模型请求的首内容/首文本延迟；来自 adapter 的精确观测。
+  timeToFirstContentMs: z.number().nonnegative().optional(),
+  timeToFirstTextMs: z.number().nonnegative().optional(),
+  // 最近一次请求的最长流空闲与卡顿次数；用于解释高延迟。
+  streamMaxIdleMs: z.number().nonnegative().optional(),
+  streamStallCount: z.number().int().nonnegative().optional(),
   toolDurationMs: z.number().nonnegative().optional(),
   otherDurationMs: z.number().nonnegative().optional(),
   // guide 不切 product turn，但每条 accepted guide 都开启独立视觉工作段。
