@@ -24,10 +24,7 @@ import { logger } from "@/logger.js";
 import type { ConversationTurnNavigatorHydrationResult } from "@/v4/conversationTurnNavigatorHelpers.js";
 import type { ConversationTransport } from "@/v4/transport.js";
 import { ConversationRowPool } from "@/v4/conversationRowSharing.js";
-import {
-  rewindsIntoUnloadedHead,
-  trimRowsToRecentTurns,
-} from "@/v4/conversationLiveRetention.js";
+import { rewindsIntoUnloadedHead, trimRowsToRecentTurns } from "@/v4/conversationLiveRetention.js";
 import { uiMemoryDiagnosticsRegistry } from "@/lib/memoryDiagnostics.js";
 
 /**
@@ -375,8 +372,8 @@ export class ConversationProjectionStore {
   /** 视口是否跟随底部；只在跟随时裁头，避免用户向上阅读时滚动跳变。 */
   private viewFollowing = true;
   /**
-   * 帧级合帧：流式帧默认逐帧 notify，React 每帧都要走一次完整渲染。
-   * 主视图显式开启后，同一帧内的多次 setState 只通知一次；测试/其他消费者默认关闭。
+   * 帧级合帧：SessionDataLayer 为所有 UI store 开启，同一帧内的多次 setState 只通知一次；
+   * 独立构造的测试 store 默认关闭，保持同步通知。
    */
   private notifyCoalescing = false;
   private notifyScheduled = false;
@@ -829,9 +826,7 @@ export class ConversationProjectionStore {
       // snapshot 是整体替换：hiddenTurnCount 以这份窗口自身被裁掉的轮数为准，
       // 不继承旧窗口的累计值。
       const retention =
-        this.liveTurnLimit !== null
-          ? this.trimSnapshotForLiveWindow(sharedSnapshot)
-          : null;
+        this.liveTurnLimit !== null ? this.trimSnapshotForLiveWindow(sharedSnapshot) : null;
       const snapshot = retention?.snapshot ?? sharedSnapshot;
       logSubagentProjectionTransition(this.topic, this.state.snapshot, snapshot, "snapshot");
       // 规则 1：整体替换，扔掉手里的一切换新的（行对象按值复用旧引用，语义仍是整体替换）。
@@ -896,9 +891,7 @@ export class ConversationProjectionStore {
     // rewind 目标落在已裁掉/未加载的窗口头部时，本地 apply 会把所有已加载行删掉，
     // 但真正应保留的早期行不在手里，totalCount 也无法正确递减；必须拿新 snapshot。
     if (rewindsIntoUnloadedHead(current, frame.payload.deltas)) {
-      const fromRowId = frame.payload.deltas.find(
-        (delta) => delta.op === "row.removed",
-      )?.fromRowId;
+      const fromRowId = frame.payload.deltas.find((delta) => delta.op === "row.removed")?.fromRowId;
       logger.warn(
         `[v4-store] ${this.topic} rewind 目标在未加载头部 fromRowId=${fromRowId ?? "unknown"}，强制 snapshot 重订阅`,
       );

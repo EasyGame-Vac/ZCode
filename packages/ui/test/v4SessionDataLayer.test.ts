@@ -26,6 +26,7 @@ import {
   E2E_SESSION_DATA_LAYER_KEEP_WARM_MS,
   resolveSessionDataLayerKeepWarmMs,
   SESSION_DATA_LAYER_KEEP_WARM_MS,
+  SESSION_DATA_LAYER_MAX_ENTRIES,
   SessionDataLayer,
 } from "@/v4/sessionDataLayer.js";
 import {
@@ -1499,6 +1500,8 @@ describe("SessionDataLayer", () => {
   it("只在 E2E store bridge build 中缩放 keep-warm 时间", () => {
     expect(resolveSessionDataLayerKeepWarmMs(false)).toBe(SESSION_DATA_LAYER_KEEP_WARM_MS);
     expect(resolveSessionDataLayerKeepWarmMs(true)).toBe(E2E_SESSION_DATA_LAYER_KEEP_WARM_MS);
+    expect(SESSION_DATA_LAYER_KEEP_WARM_MS).toBe(5 * 60_000);
+    expect(SESSION_DATA_LAYER_MAX_ENTRIES).toBe(8);
   });
 
   afterEach(() => {
@@ -1519,6 +1522,29 @@ describe("SessionDataLayer", () => {
       }),
     );
     expect(lease.store.getState().snapshot?.rows.window).toHaveLength(1);
+  });
+
+  it("所有 UI store 的通知在下一帧合帧，且状态读取保持同步", async () => {
+    const lease = layer.acquire("s1");
+    await flushMicrotasks();
+    // 先让首连产生的合帧通知落地，避免影响本次断言。
+    await vi.advanceTimersByTimeAsync(20);
+
+    const listener = vi.fn();
+    const unsubscribe = lease.store.subscribe(listener);
+    transport.emit(
+      makeFrame("sub-1", 5, 6, {
+        kind: "deltas",
+        deltas: [{ op: "row.appended", row: assistantRow(1, "hi") }],
+      }),
+    );
+
+    expect(lease.store.getState().snapshot?.rows.window).toHaveLength(1);
+    expect(listener).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(20);
+    expect(listener).toHaveBeenCalledTimes(1);
+    unsubscribe();
   });
 
   describe("行结构共享（docs/performance/conversation-row-structural-sharing.md）", () => {
@@ -1688,6 +1714,37 @@ describe("SessionDataLayer", () => {
     layer.acquire("s1");
     await flushMicrotasks();
     expect(transport.subscribeCalls).toHaveLength(2);
+  });
+
+  it("keep-warm 超过上限时淘汰最久未使用的空闲 store", async () => {
+    const leases = Array.from({ length: SESSION_DATA_LAYER_MAX_ENTRIES }, (_, index) =>
+      layer.acquire(`s${index + 1}`),
+    );
+    await flushMicrotasks();
+    for (const lease of leases) lease.release();
+
+    const ninth = layer.acquire("s9");
+    await flushMicrotasks();
+
+    expect(layer.size).toBe(SESSION_DATA_LAYER_MAX_ENTRIES);
+    expect(transport.unsubscribeCalls).toEqual(["sub-1"]);
+    expect(ninth.openKind).toBe("cold");
+    expect(ninth.store.getState().status).toBe("live");
+  });
+
+  it("活跃 store 超过上限时不会被淘汰", async () => {
+    const leases = Array.from({ length: SESSION_DATA_LAYER_MAX_ENTRIES }, (_, index) =>
+      layer.acquire(`s${index + 1}`),
+    );
+    await flushMicrotasks();
+
+    const extra = layer.acquire("s9");
+    await flushMicrotasks();
+
+    expect(layer.size).toBe(SESSION_DATA_LAYER_MAX_ENTRIES + 1);
+    expect(transport.unsubscribeCalls).toHaveLength(0);
+    extra.release();
+    for (const lease of leases) lease.release();
   });
 
   it("release 幂等：重复 release 不影响其他租约", async () => {
@@ -2217,13 +2274,7 @@ describe("Conversation live retention", () => {
     });
     transport.subscribeImpl = (params, subscriptionId) => ({
       ack: { subscriptionId, mode: "snapshot", logEpoch: "epoch-1" },
-      initialFrame: makeFrame(
-        subscriptionId,
-        0,
-        5,
-        { kind: "snapshot", snapshot },
-        params.topic,
-      ),
+      initialFrame: makeFrame(subscriptionId, 0, 5, { kind: "snapshot", snapshot }, params.topic),
     });
     await store.connect();
     return snapshot;

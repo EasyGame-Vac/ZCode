@@ -1313,8 +1313,23 @@ export const messageResponsePropsAreEqual = (
   nextProps.onOpenExternalUrl === prevProps.onOpenExternalUrl;
 
 // 流式 markdown 的预处理/lex 是 O(文本长度) 每 chunk，长回答累计 O(L²)。
-// 只把“提交给解析管线”的文本按 50ms 合并；完成态仍立即使用最终全文。
+// 短文本保持 50ms 的跟手感；正文越长单次解析越贵，提交间隔随之放宽，
+// 避免长回答在后半程把每帧都花在全文重解析上。完成态仍立即使用最终全文。
 const STREAMING_MARKDOWN_COMMIT_INTERVAL_MS = 50;
+const STREAMING_MARKDOWN_LONG_COMMIT_INTERVAL_MS = 100;
+const STREAMING_MARKDOWN_VERY_LONG_COMMIT_INTERVAL_MS = 150;
+const STREAMING_MARKDOWN_LONG_LENGTH = 16_000;
+const STREAMING_MARKDOWN_VERY_LONG_LENGTH = 48_000;
+
+export function resolveStreamingMarkdownCommitIntervalMs(markdownLength: number): number {
+  if (markdownLength >= STREAMING_MARKDOWN_VERY_LONG_LENGTH) {
+    return STREAMING_MARKDOWN_VERY_LONG_COMMIT_INTERVAL_MS;
+  }
+  if (markdownLength >= STREAMING_MARKDOWN_LONG_LENGTH) {
+    return STREAMING_MARKDOWN_LONG_COMMIT_INTERVAL_MS;
+  }
+  return STREAMING_MARKDOWN_COMMIT_INTERVAL_MS;
+}
 
 function useStreamingMarkdownCommit(markdown: string, streaming: boolean): string {
   const [committed, setCommitted] = useState(markdown);
@@ -1335,7 +1350,7 @@ function useStreamingMarkdownCommit(markdown: string, streaming: boolean): strin
     timerRef.current = setTimeout(() => {
       timerRef.current = null;
       setCommitted(latestRef.current);
-    }, STREAMING_MARKDOWN_COMMIT_INTERVAL_MS);
+    }, resolveStreamingMarkdownCommitIntervalMs(latestRef.current.length));
   }, [committed, markdown, streaming]);
 
   useEffect(

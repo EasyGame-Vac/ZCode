@@ -1,6 +1,6 @@
 # 会话切换延迟：加载分层与优化选项
 
-状态：诊断与提案，未实现。本文不是已批准的实现合同；进入代码改动前，按 `AGENTS.md` 先补对应 spec。
+状态：诊断与提案；选项 A 已实现（2026-10-28），选项 B–E 未实现。
 
 日期：2026-10-28
 
@@ -107,9 +107,10 @@ SessionDataLayer.acquire
 
 ## 6. 优化选项
 
-### 选项 A：扩大 renderer keep-warm，并加 LRU 上限（建议先做）
+### 选项 A：扩大 renderer keep-warm，并加 LRU 上限（建议先做，已实现）
 
 - 改动：`SESSION_DATA_LAYER_KEEP_WARM_MS` 从 30s 提到 5–10 分钟；`SessionDataLayer` 增加活跃 store 上限（例如 8 个），超出按最近使用淘汰。
+- 实现值：keep-warm **5 分钟**、空闲 store 上限 **8 个**，按 `lastUsedAt` 淘汰最久未使用的空闲 store；活跃 pane 不淘汰。详见 §11。
 - 收益：窗口内的切换直接复用已有 store 和 snapshot，不再 cold acquire，也不会出现空白等待。按当前间隔分布，5 分钟覆盖约 75%，10 分钟约 90%。
 - 成本：最多 N 个后台订阅和 store；`ConversationRowPool` 已跨 store 共享行对象，但每个 store 仍持有自己的窗口和 UI 状态。需要测量 renderer 内存与后台帧处理 CPU。
 - 风险：低。E2E 已有独立的 1 秒 keep-warm 常量（`sessionDataLayer.ts:32`），测试路径不受影响。
@@ -173,3 +174,10 @@ SessionDataLayer.acquire
 - running 中的会话是否应无条件保留，避免用户切回时中断观感？
 - 选项 B 需要确认 resume 期间新增事件的增量路径是否已经覆盖所有 runtime initialization 语义。
 - 现有 `v4-conversation-cold-hydration.md` 已详细记录 Host 投影算法与历史性能数据，本文只补充“会话切换 / keep-warm / 重复重建”这一层，不重复其测量。
+
+## 11. 选项 A 实现记录（2026-10-28）
+
+- `SESSION_DATA_LAYER_KEEP_WARM_MS` 从 30 秒提高到 **5 分钟**；E2E 的 1 秒 keep-warm 常量保持不变。
+- 新增 `SESSION_DATA_LAYER_MAX_ENTRIES = 8`；新建 store 前按 `lastUsedAt` 淘汰最久未使用的空闲 store，只淘汰 `refCount === 0`，活跃 pane 不会被关闭。全部活跃时允许暂时超过上限。
+- 淘汰时清理 keep-warm timer、关闭 store，并记录 `v4.session_data.keep_warm_evicted`。
+- 验收：keep-warm 内重开复用同一 store；超过上限淘汰最久空闲 store；活跃 store 不淘汰；E2E 路径仍使用 1 秒常量。

@@ -8,6 +8,7 @@ import {
   MessageResponse,
   openMessageFileLinkInEditor,
   resolveMessageStreamdownMode,
+  resolveStreamingMarkdownCommitIntervalMs,
 } from "@/components/ai-elements/message.js";
 import { TooltipProvider } from "@/components/ui/tooltip.js";
 import { ZCodeIntlProvider } from "@/i18n/IntlProvider.js";
@@ -650,4 +651,17 @@ it("通用模式回答保留代码容器和复制入口，锁定换行入口且�
       { ...props, forceCodeWrap: false },
     ),
   ).toBe(false);
+});
+
+describe("resolveStreamingMarkdownCommitIntervalMs", () => {
+  it.each([
+    [0, 50],
+    [15_999, 50],
+    [16_000, 100],
+    [47_999, 100],
+    [48_000, 150],
+    [200_000, 150],
+  ])("正文长度 %i 时使用 %ims 的提交间隔", (length, expected) => {
+    expect(resolveStreamingMarkdownCommitIntervalMs(length)).toBe(expected);
+  });
 });

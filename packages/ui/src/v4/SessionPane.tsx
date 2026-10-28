@@ -470,6 +470,9 @@ const EMPTY_SUBAGENT_PROJECTION: NonNullable<ConversationSnapshot["subagents"]> 
 };
 
 const MAX_CONVERSATION_FILE_CHANGES_CACHE_ENTRIES = 20;
+// 分享关闭时复用的空结果，避免每个流式帧都新建空数组并触发下游 memo 失效。
+const EMPTY_SHARE_RENDER_UNITS: ReturnType<typeof buildConversationTurnRenderUnits> = [];
+const EMPTY_SHARE_ITEMS: ReturnType<typeof buildConversationShareItems> = [];
 
 function toComposerUiError(
   sessionId: string | null | undefined,
@@ -747,9 +750,9 @@ export function SessionPane({
   const state = useConversationProjection(lease);
   // 主视图只保留最近 K 个产品轮；历史仍在 Host/SQLite，按需经 rows/range 加载。
   // 这里只改 Renderer 窗口，不改变消息持久化、模型上下文和分享内容。
+  // 通知合帧由 SessionDataLayer 对所有 UI store 统一开启。
   useEffect(() => {
     lease?.store.setLiveTurnLimit(DEFAULT_LIVE_TURN_LIMIT);
-    lease?.store.setNotificationCoalescing(true);
   }, [lease]);
   const handleTimelineFollowingChange = useCallback(
     (following: boolean) => {
@@ -823,28 +826,35 @@ export function SessionPane({
       new Set([...pendingShareRowIds].map((id) => shareDraft?.productTurnIdByRowId[id] ?? id)).size,
     [pendingShareRowIds, shareDraft],
   );
+  // 分享目录只在分享面板/确认 dock 打开时参与渲染；关闭时仍每帧构建会白跑
+  // 一次 render units 和 O(units×queries) 的 share items，是流式期间的主要浪费之一。
   const shareRenderUnits = useMemo(
-    () => buildConversationTurnRenderUnits(snapshot?.rows.window ?? []),
-    [snapshot?.rows.window],
+    () =>
+      shareActive
+        ? buildConversationTurnRenderUnits(snapshot?.rows.window ?? [])
+        : EMPTY_SHARE_RENDER_UNITS,
+    [shareActive, snapshot?.rows.window],
   );
   const shareItems = useMemo(
     () =>
-      buildConversationShareItems(shareRenderUnits, {
-        assistantEmptyPreview: intl.formatMessage({
-          id: "chat.turnNavigator.emptyAssistant",
-        }),
-        assistantRunningPreview: intl.formatMessage({
-          id: "chat.turnNavigator.runningAssistant",
-        }),
-        userFallbackPreview: intl.formatMessage({
-          id: "chat.turnNavigator.userFallback",
-        }),
-      }),
-    [intl, shareRenderUnits],
+      shareActive
+        ? buildConversationShareItems(shareRenderUnits, {
+            assistantEmptyPreview: intl.formatMessage({
+              id: "chat.turnNavigator.emptyAssistant",
+            }),
+            assistantRunningPreview: intl.formatMessage({
+              id: "chat.turnNavigator.runningAssistant",
+            }),
+            userFallbackPreview: intl.formatMessage({
+              id: "chat.turnNavigator.userFallback",
+            }),
+          })
+        : EMPTY_SHARE_ITEMS,
+    [intl, shareActive, shareRenderUnits],
   );
   const eligibleShareItems = useMemo(
-    () => shareItems.filter((item) => !item.isRunning),
-    [shareItems],
+    () => (shareActive ? shareItems.filter((item) => !item.isRunning) : EMPTY_SHARE_ITEMS),
+    [shareActive, shareItems],
   );
   useEffect(() => {
     if (!sessionId || !shareActive) return;

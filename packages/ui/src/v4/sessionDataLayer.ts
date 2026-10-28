@@ -24,12 +24,19 @@ export interface SessionLease {
 
 export interface SessionDataLayerOptions {
   transport: ConversationTransport;
-  /** 引用归零后延迟退订窗口（ms），默认 30s。 */
+  /** 引用归零后延迟退订窗口（ms）。 */
   keepWarmMs?: number;
+  /** keep-warm 期间最多保留的空闲 store 数。 */
+  maxEntries?: number;
 }
 
-export const SESSION_DATA_LAYER_KEEP_WARM_MS = 30_000;
+/**
+ * 引用归零后保留 store 的窗口。5 分钟覆盖约 75% 的会话重开间隔
+ * （docs/performance/session-switch-latency.md）。
+ */
+export const SESSION_DATA_LAYER_KEEP_WARM_MS = 5 * 60_000;
 export const E2E_SESSION_DATA_LAYER_KEEP_WARM_MS = 1_000;
+export const SESSION_DATA_LAYER_MAX_ENTRIES = 8;
 
 export function resolveSessionDataLayerKeepWarmMs(
   e2eStoreBridgeEnabled = shouldExposeE2EStoreBridge(),
@@ -43,6 +50,8 @@ interface SessionEntry {
   store: ConversationProjectionStore;
   refCount: number;
   keepWarmTimer: ReturnType<typeof setTimeout> | null;
+  /** 最近一次 acquire/release 的单调时钟，供 LRU 淘汰空闲 store。 */
+  lastUsedAt: number;
 }
 
 function monotonicNow(): number {
@@ -52,6 +61,7 @@ function monotonicNow(): number {
 export class SessionDataLayer {
   private readonly transport: ConversationTransport;
   private readonly keepWarmMs: number;
+  private readonly maxEntries: number;
   private readonly entries = new Map<string, SessionEntry>();
   // 行结构共享池跨 store 生命周期：keep-warm 过期冷打开的新 store 仍能复用被留住的旧行
   // （docs/performance/conversation-row-structural-sharing.md）。
@@ -62,6 +72,7 @@ export class SessionDataLayer {
   constructor(options: SessionDataLayerOptions) {
     this.transport = options.transport;
     this.keepWarmMs = options.keepWarmMs ?? resolveSessionDataLayerKeepWarmMs();
+    this.maxEntries = options.maxEntries ?? SESSION_DATA_LAYER_MAX_ENTRIES;
     // 连接级单监听：按 topic 扇入到各 store（pane 间共享的正是这一条连接）。
     this.offFrame = this.transport.onFrame((frame, context) => {
       this.entries.get(frame.topic)?.store.handleFrame(frame, context);
@@ -84,13 +95,21 @@ export class SessionDataLayer {
     if (entry) {
       openKind = entry.keepWarmTimer !== null ? "keep_warm" : "warm";
       entry.refCount++;
+      entry.lastUsedAt = startedAt;
       if (entry.keepWarmTimer !== null) {
         clearTimeout(entry.keepWarmTimer);
         entry.keepWarmTimer = null;
       }
     } else {
+      // 先给 keep-warm 池腾位：只淘汰空闲 store，活跃 pane 不参与。
+      if (this.entries.size >= this.maxEntries) {
+        this.evictLeastRecentlyUsedIdleEntry();
+      }
       const store = new ConversationProjectionStore(topic, this.transport, this.rowPool);
-      entry = { store, refCount: 1, keepWarmTimer: null };
+      // 所有 UI store 统一合帧：后台/子面板 store 不再在 MessagePort 回调里同步渲染，
+      // 同一帧内的多次 setState 只通知一次。
+      store.setNotificationCoalescing(true);
+      entry = { store, refCount: 1, keepWarmTimer: null, lastUsedAt: startedAt };
       this.entries.set(topic, entry);
       openKind = "cold";
       // 订阅失败落在 store.state（status=error + retry()），不在这里抛。
@@ -135,6 +154,7 @@ export class SessionDataLayer {
     const entry = this.entries.get(topic);
     if (!entry) return;
     entry.refCount--;
+    entry.lastUsedAt = monotonicNow();
     if (entry.refCount > 0 || this.disposed) {
       logger.lifecycle.info("v4 session data lease released", {
         event: "v4.session_data.release",
@@ -165,6 +185,35 @@ export class SessionDataLayer {
       status: "keep_warm",
       topic,
     });
+  }
+
+  /**
+   * keep-warm 池达到上限时淘汰最久未使用的空闲 store。
+   * 只处理 refCount === 0；活跃 pane 永不淘汰，全部活跃时允许暂时超过上限。
+   */
+  private evictLeastRecentlyUsedIdleEntry(): void {
+    let oldestTopic: string | null = null;
+    let oldestUsedAt = Number.POSITIVE_INFINITY;
+    for (const [topic, entry] of this.entries) {
+      if (entry.refCount > 0) continue;
+      if (entry.lastUsedAt < oldestUsedAt) {
+        oldestUsedAt = entry.lastUsedAt;
+        oldestTopic = topic;
+      }
+    }
+    if (oldestTopic === null) return;
+    const entry = this.entries.get(oldestTopic);
+    if (!entry) return;
+    if (entry.keepWarmTimer !== null) clearTimeout(entry.keepWarmTimer);
+    this.entries.delete(oldestTopic);
+    logger.lifecycle.info("v4 session data keep-warm evicted", {
+      event: "v4.session_data.keep_warm_evicted",
+      module: "ui.v4.session_data_layer",
+      refCount: 0,
+      status: "completed",
+      topic: oldestTopic,
+    });
+    void entry.store.close();
   }
 
   /** 连接销毁时清场（window/workspace 卸载）。 */
