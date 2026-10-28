@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self' file:; script-src 'self' file:; style-src 'self' file:; img-src 'self' data: file:; object-src 'none'; base-uri 'none'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="./console.css" />
+    <title>ZCode 精灵控制台</title>
+  </head>
+  <body>
+    <header class="console-header">
+      <span class="console-title">精灵控制台</span>
+      <span class="console-hint">工具活动与系统消息</span>
+      <button id="open-log" type="button">打开原始日志</button>
+      <button id="clear" type="button">清空</button>
+    </header>
+    <pre id="output" aria-live="polite"></pre>
+    <script type="module" src="./console.js"></script>
+  </body>
+</html>

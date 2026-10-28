@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("duetPet", {
   init: () => ipcRenderer.invoke("pet:init"),
   saveMessages: (messages) => ipcRenderer.invoke("pet:save-messages", messages),
+  logActivity: (text) => ipcRenderer.invoke("pet:log-activity", text),
   sendMessage: (text) => ipcRenderer.invoke("pet:send", text),
   cancel: () => ipcRenderer.invoke("pet:cancel"),
   resetSession: () => ipcRenderer.invoke("pet:reset-session"),

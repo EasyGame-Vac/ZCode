@@ -4,10 +4,6 @@ const api = window.duetPet;
 const app = document.querySelector("#app");
 const statusText = document.querySelector("#status-text");
 const messagesEl = document.querySelector("#messages");
-const activityBar = document.querySelector("#activity-bar");
-const activityToggle = document.querySelector("#activity-toggle");
-const activitySummary = document.querySelector("#activity-summary");
-const activityEl = document.querySelector("#activity");
 const previewEl = document.querySelector("#preview");
 const previewToggle = document.querySelector("#preview-toggle");
 const previewTitle = document.querySelector("#preview-title");
@@ -37,12 +33,16 @@ let sending = false;
 let currentModel = "";
 let modelsLoading = false;
 let dragState = null;
-let activityExpanded = false;
 let previewExpanded = false;
 let persistedMessageSignature = "";
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function logActivity(text) {
+  if (!api.logActivity || typeof text !== "string" || text.trim().length === 0) return;
+  void api.logActivity(text).catch(() => {});
 }
 
 function truncate(text, max) {
@@ -137,24 +137,6 @@ function renderMessages() {
   }
 
   messagesEl.scrollTop = messagesEl.scrollHeight;
-}
-
-function renderActivity() {
-  const items = state.activity.slice(-8);
-  activityBar.hidden = items.length === 0;
-  activityBar.classList.toggle("expanded", activityExpanded);
-  activityToggle.setAttribute("aria-expanded", String(activityExpanded));
-  activitySummary.textContent = items.length > 0 ? truncate(items.at(-1).text, 60) : "工具活动";
-
-  activityEl.replaceChildren();
-  for (const item of items) {
-    const element = document.createElement("div");
-    element.className = "activity-item";
-    element.textContent = item.text;
-    element.title = item.text;
-    activityEl.append(element);
-  }
-  if (activityExpanded) activityEl.scrollTop = activityEl.scrollHeight;
 }
 
 function renderPreview() {
@@ -270,7 +252,6 @@ function render() {
   statusText.textContent = label;
   collapsedStatusText.textContent = truncate(label, 18);
   renderMessages();
-  renderActivity();
   renderPreview();
   renderActions();
   persistMessages();
@@ -297,17 +278,9 @@ function handleBrainEvent(event) {
       break;
     case "reasoning-delta":
       break;
+    // 工具活动和系统消息由 main 写入独立控制台，不再进入对话面板。
     case "tool":
-      dispatch({
-        type: "tool",
-        toolName: event.toolName,
-        toolCallId: event.toolCallId,
-        phase: event.phase,
-        description: event.description,
-      });
-      break;
     case "activity":
-      dispatch({ type: "activity", text: event.text });
       break;
     case "session":
       dispatch({ type: "session", sessionId: event.sessionId });
@@ -345,7 +318,7 @@ function handleTaskComplete(payload) {
     text: "没拿到改动摘要。确认 K 已经 commit，并且宿管在运行。",
   });
   if (payload?.previewError) {
-    dispatch({ type: "activity", text: payload.previewError });
+    logActivity(payload.previewError);
   }
 }
 
@@ -367,7 +340,7 @@ function handleSupervisorError(payload) {
   const message = typeof payload?.message === "string" ? payload.message : "宿管连接失败";
   if (message === lastSupervisorError) return;
   lastSupervisorError = message;
-  dispatch({ type: "activity", text: `宿管：${message}` });
+  logActivity(`宿管：${message}`);
 }
 
 function applyModelValue(model) {
@@ -409,15 +382,8 @@ function handleEvent(envelope) {
     case "model-changed":
       applyModelValue(payload?.model);
       break;
-    case "context-rotated":
-      dispatch({
-        type: "activity",
-        text: `已丢弃较早上下文，保留最近 ${payload?.keep ?? 20} 条消息。`,
-      });
-      break;
     case "session-reset":
       dispatch({ type: "reset" });
-      activityExpanded = false;
       previewExpanded = false;
       greeted = false;
       supervisorOnline = Boolean(state.supervisor);
@@ -544,7 +510,7 @@ async function loadModels() {
     if (currentModel) fallback.push(new Option(`${currentModel}（当前）`, currentModel));
     modelSelect.replaceChildren(...fallback);
     applyModelValue(currentModel);
-    dispatch({ type: "activity", text: `模型列表：${errorMessage(error)}` });
+    logActivity(`模型列表：${errorMessage(error)}`);
   } finally {
     modelsLoading = false;
     scheduleRender();
@@ -558,10 +524,10 @@ async function changeModel() {
   try {
     const result = await api.setModel(next);
     applyModelValue(result?.model);
-    dispatch({ type: "activity", text: `模型：${currentModel || "默认"}` });
+    logActivity(`模型：${currentModel || "默认"}`);
   } catch (error) {
     modelSelect.value = currentModel;
-    dispatch({ type: "activity", text: `切换模型失败：${errorMessage(error)}` });
+    logActivity(`切换模型失败：${errorMessage(error)}`);
   } finally {
     scheduleRender();
   }
@@ -690,10 +656,6 @@ function bindUi() {
   });
   modelSelect.addEventListener("change", () => {
     void changeModel();
-  });
-  activityToggle.addEventListener("click", () => {
-    activityExpanded = !activityExpanded;
-    scheduleRender();
   });
   previewToggle.addEventListener("click", () => {
     previewExpanded = !previewExpanded;

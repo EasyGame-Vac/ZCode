@@ -10,10 +10,10 @@ import {
   Menu,
   nativeImage,
   screen,
-  shell,
   Tray,
 } from "electron";
 import { stopProcessTree } from "../lib/process.mjs";
+import { createActivityConsole, formatBrainActivity } from "./lib/activity-console.mjs";
 import { resolveBrainCommand } from "./lib/brain-command.mjs";
 import { buildContextHandoff } from "./lib/context-handoff.mjs";
 import { createEventStream } from "./lib/event-parser.mjs";
@@ -34,8 +34,9 @@ const PET_STATE_PATH = join(STATE_DIR, "pet-state.json");
 const PET_MESSAGES_PATH = join(STATE_DIR, "pet-messages.json");
 const SESSION_PATH = join(STATE_DIR, "pet-session.json");
 const TOKEN_PATH = join(STATE_DIR, "token");
-// 精灵 UI 的“日志”按钮指向精灵自己的日志；窗口日志由 supervisor 的 /status 暴露。
+// 精灵 UI 的“日志”指向精灵自己的日志；窗口日志由 supervisor 的 /status 暴露。
 const LOG_PATH = join(STATE_DIR, "logs", "k.log");
+const ACTIVITY_LOG_PATH = join(STATE_DIR, "logs", "k-activity.log");
 const IS_SMOKE = process.env.DUET_PET_SMOKE === "1";
 const K_INSTRUCTION =
   "你是 K，ZCode 的桌面小人。先阅读 scripts/duet/k-prompt.md，并严格遵守其中的约束。";
@@ -356,11 +357,6 @@ function createWindow() {
   void win.loadFile(join(import.meta.dirname, "renderer", "index.html"));
 }
 
-async function openLog() {
-  const error = await shell.openPath(LOG_PATH);
-  if (error) warn("open log failed:", error);
-}
-
 function createTray() {
   if (IS_SMOKE || process.platform === "darwin") return;
   const iconPath = join(import.meta.dirname, "assets", "mascot-tray.png");
@@ -386,9 +382,9 @@ function createTray() {
           },
         },
         {
-          label: "打开日志",
+          label: "打开控制台",
           click: () => {
-            void openLog();
+            void activityConsole.open();
           },
         },
         {
@@ -425,6 +421,12 @@ const brainCommand = () =>
 const modelCatalog = createModelCatalog({ resolveCommand: brainCommand });
 const petMessages = createMessageStore(PET_MESSAGES_PATH);
 const sessionStore = createSessionStore(SESSION_PATH);
+const activityConsole = createActivityConsole({
+  activityPath: ACTIVITY_LOG_PATH,
+  logPath: LOG_PATH,
+  htmlPath: join(import.meta.dirname, "renderer", "console.html"),
+  preloadPath: join(import.meta.dirname, "console-preload.cjs"),
+});
 
 async function setModel(model) {
   const next = typeof model === "string" ? model.trim() : "";
@@ -590,7 +592,9 @@ async function sendMessage(text) {
     let stderr = "";
     if (rotate) {
       sendEvent("context-rotated", { keep: CONTEXT_KEEP_MESSAGES });
+      activityConsole.append(`已丢弃较早上下文，保留最近 ${CONTEXT_KEEP_MESSAGES} 条消息。`);
     }
+    activityConsole.append("—— 新一轮任务 ——");
     sendEvent("brain-start", { sessionId });
 
     const stream = createEventStream({
@@ -616,6 +620,8 @@ async function sendMessage(text) {
             ...(rotate ? { contextUsed: null, contextWindow: null } : {}),
           });
         }
+        const activity = formatBrainActivity(event);
+        if (activity) activityConsole.append(activity);
         sendEvent("brain-event", event);
       },
       onMalformed: (line) => {
@@ -639,8 +645,9 @@ async function sendMessage(text) {
         return;
       }
       const exitCode = code ?? (signal ? 1 : 0);
+      activityConsole.append(exitCode === 0 ? "brain finished" : "brain exited with error");
       if (exitCode !== 0) {
-        // 把 brain 的失败尾部落到 k.log，UI 的“日志”按钮才有可排查的内容。
+        // 把 brain 的失败尾部落到 k.log，控制台的“原始日志”才有可排查的内容。
         warn("brain failed", `code=${exitCode}`, tail(stderr, 12));
       }
       sendEvent("brain-exit", {
@@ -745,6 +752,10 @@ function registerIpc() {
   ipcMain.handle("pet:set-model", async (_event, model) => setModel(model));
   ipcMain.on("pet:drag-start", () => windowDrag.start());
   ipcMain.on("pet:drag-end", () => windowDrag.stop());
+  ipcMain.handle("pet:log-activity", async (_event, text) => {
+    activityConsole.append(text);
+    return { ok: true };
+  });
   ipcMain.handle("pet:send", async (_event, text) => sendMessage(text));
   ipcMain.handle("pet:cancel", async () => cancelBrain());
   ipcMain.handle("pet:reset-session", async () => {

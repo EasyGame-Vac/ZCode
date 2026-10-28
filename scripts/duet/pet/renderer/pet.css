@@ -11,7 +11,6 @@
   --success: #4dd4a6;
   --user-bubble: rgba(139, 124, 255, 0.26);
   --assistant-bubble: rgba(255, 255, 255, 0.07);
-  --activity: rgba(255, 255, 255, 0.04);
   --shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
 }
 
@@ -214,13 +213,11 @@ button {
 }
 
 .messages::-webkit-scrollbar,
-.activity::-webkit-scrollbar,
 .preview::-webkit-scrollbar {
   width: 6px;
 }
 
 .messages::-webkit-scrollbar-thumb,
-.activity::-webkit-scrollbar-thumb,
 .preview::-webkit-scrollbar-thumb {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.14);
@@ -255,54 +252,34 @@ button {
   animation: caret 1s steps(1) infinite;
 }
 
-.activity-bar {
-  flex: none;
-  padding: 0 12px 6px;
-  -webkit-app-region: no-drag;
-  app-region: no-drag;
-}
-
-.activity-bar[hidden] {
-  display: none;
-}
-
-.activity-toggle,
 .preview-toggle {
   display: flex;
   width: 100%;
   align-items: center;
   gap: 6px;
-  padding: 4px 6px;
+  padding: 2px 0;
   overflow: hidden;
   border: none;
   border-radius: 8px;
-  background: var(--activity);
-  color: var(--muted);
-  font-size: 10.5px;
+  background: transparent;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
   text-align: left;
   white-space: nowrap;
   cursor: pointer;
 }
 
-.activity-toggle:hover,
 .preview-toggle:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: transparent;
+  color: var(--accent);
 }
 
-#activity-summary,
 #preview-title {
   min-width: 0;
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.activity-dot {
-  width: 5px;
-  height: 5px;
-  flex: none;
-  border-radius: 50%;
-  background: var(--accent-2);
 }
 
 .caret {
@@ -311,39 +288,8 @@ button {
   transition: transform 120ms ease;
 }
 
-.activity-bar.expanded .caret,
 .preview.expanded .caret {
   transform: rotate(90deg);
-}
-
-.activity {
-  display: none;
-  max-height: 76px;
-  flex-direction: column;
-  gap: 3px;
-  overflow-y: auto;
-  padding-top: 5px;
-  color: var(--muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 10.5px;
-  line-height: 1.35;
-}
-
-.activity-bar.expanded .activity {
-  display: flex;
-}
-
-.activity:empty {
-  display: none !important;
-}
-
-.activity-item {
-  padding: 3px 6px;
-  overflow: hidden;
-  border-radius: 6px;
-  background: var(--activity);
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .preview {
@@ -359,19 +305,6 @@ button {
 
 .preview[hidden] {
   display: none;
-}
-
-.preview-toggle {
-  padding: 2px 0;
-  background: transparent;
-  color: var(--text);
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.preview-toggle:hover {
-  background: transparent;
-  color: var(--accent);
 }
 
 .preview-files {
@@ -859,7 +792,6 @@ button:disabled {
     --muted: #6d6a80;
     --assistant-bubble: rgba(22, 20, 34, 0.055);
     --user-bubble: rgba(109, 91, 255, 0.14);
-    --activity: rgba(22, 20, 34, 0.04);
     --shadow: 0 18px 50px rgba(40, 36, 80, 0.18);
   }
 
@@ -885,7 +817,6 @@ button:disabled {
   }
 
   .messages::-webkit-scrollbar-thumb,
-  .activity::-webkit-scrollbar-thumb,
   .preview::-webkit-scrollbar-thumb {
     background: rgba(22, 20, 34, 0.16);
   }
@@ -894,7 +825,6 @@ button:disabled {
     background: rgba(22, 20, 34, 0.05);
   }
 
-  .activity-toggle:hover,
   .preview-toggle:hover {
     background: rgba(22, 20, 34, 0.07);
   }
