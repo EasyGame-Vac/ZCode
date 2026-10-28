@@ -1,9 +1,13 @@
 import { createInitialPetState, reducePetState } from "../lib/state-machine.mjs";
+import { createConversationView } from "../shared/renderer/conversation-view.mjs";
+import { createStickyScroll } from "../shared/renderer/sticky-scroll.mjs";
 
 const api = window.duetPet;
 const app = document.querySelector("#app");
 const statusText = document.querySelector("#status-text");
 const messagesEl = document.querySelector("#messages");
+const scrollBottomButton = document.querySelector("#scroll-bottom");
+const chatButton = document.querySelector("#chat-button");
 const previewEl = document.querySelector("#preview");
 const previewToggle = document.querySelector("#preview-toggle");
 const previewTitle = document.querySelector("#preview-title");
@@ -23,6 +27,12 @@ const collapsedStatus = document.querySelector("#collapsed-status");
 const collapsedStatusText = document.querySelector("#collapsed-status-text");
 const modelSelect = document.querySelector("#model-select");
 
+const conversationView = createConversationView({ container: messagesEl });
+const stickyScroll = createStickyScroll({
+  container: messagesEl,
+  button: scrollBottomButton,
+});
+
 let state = createInitialPetState();
 let collapsed = false;
 let greeted = false;
@@ -35,6 +45,7 @@ let modelsLoading = false;
 let dragState = null;
 let previewExpanded = false;
 let persistedMessageSignature = "";
+let lastChatMessageSignature = "";
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
@@ -120,23 +131,9 @@ function statusLabel() {
 }
 
 function renderMessages() {
-  messagesEl.replaceChildren();
-
-  for (const message of state.messages) {
-    const element = document.createElement("div");
-    element.className = `message ${message.role}`;
-    element.textContent = message.text;
-    messagesEl.append(element);
-  }
-
-  if (state.streaming && state.busy) {
-    const element = document.createElement("div");
-    element.className = "message assistant streaming";
-    element.textContent = state.streaming;
-    messagesEl.append(element);
-  }
-
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  const previousScrollTop = messagesEl.scrollTop;
+  conversationView.render(state);
+  stickyScroll.afterRender(previousScrollTop);
 }
 
 function renderPreview() {
@@ -245,6 +242,22 @@ function persistMessages() {
   void api.saveMessages(state.messages).catch(() => {});
 }
 
+function syncChat(label) {
+  if (!api.syncChatMessages || !api.syncChatStream) return;
+  const last = state.messages.at(-1);
+  const signature = `${state.messages.length}:${last?.id ?? ""}:${last?.text?.length ?? 0}`;
+  if (signature !== lastChatMessageSignature) {
+    lastChatMessageSignature = signature;
+    api.syncChatMessages(state.messages);
+  }
+  api.syncChatStream({
+    streaming: state.streaming,
+    busy: state.busy,
+    mode: state.mode,
+    status: label,
+  });
+}
+
 function render() {
   const label = statusLabel();
   app.dataset.state = state.mode;
@@ -255,6 +268,7 @@ function render() {
   renderPreview();
   renderActions();
   persistMessages();
+  syncChat(label);
 }
 
 function ensureGreeting() {
@@ -385,6 +399,7 @@ function handleEvent(envelope) {
     case "session-reset":
       dispatch({ type: "reset" });
       previewExpanded = false;
+      stickyScroll.stick = true;
       greeted = false;
       supervisorOnline = Boolean(state.supervisor);
       ensureGreeting();
@@ -411,6 +426,7 @@ async function submit() {
   input.value = "";
   resizeInput();
   previewExpanded = false;
+  stickyScroll.stick = true;
   dispatch({ type: "user-message", text });
   try {
     await api.sendMessage(text);
@@ -620,6 +636,9 @@ function renderFallback(message) {
 }
 
 function bindUi() {
+  chatButton.addEventListener("click", () => {
+    void api.openChat?.();
+  });
   hideButton.addEventListener("click", () => {
     void setCollapsed(true);
   });

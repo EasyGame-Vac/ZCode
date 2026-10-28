@@ -4,6 +4,8 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { createBrainRunner } from "../pet/core/brain-runner.mjs";
+import { createConversationHub } from "../pet/core/conversation-hub.mjs";
 import { classifyEvent, createEventStream, createLineParser } from "../pet/lib/event-parser.mjs";
 import { buildContextHandoff } from "../pet/lib/context-handoff.mjs";
 import { createMessageStore } from "../pet/lib/message-store.mjs";
@@ -381,6 +383,111 @@ test("session store keeps the id and the latest context usage", async () => {
     });
     await store.clear();
     assert.equal((await store.read()).sessionId, null);
+  } finally {
+    await rm(directory, { force: true, maxRetries: 10, recursive: true, retryDelay: 100 });
+  }
+});
+
+test("conversation hub publishes snapshots and falls back to stored messages", async () => {
+  const hub = createConversationHub({
+    messages: {
+      read: async () => [{ id: "stored", role: "user", text: "旧消息" }],
+    },
+  });
+  const events = [];
+  const unsubscribe = hub.subscribe((event) => events.push(event));
+
+  const initial = await hub.snapshot();
+  assert.equal(initial.messages[0].text, "旧消息");
+
+  hub.setMessages([{ id: "m1", role: "user", text: "新消息" }]);
+  hub.setStream({ streaming: "生成中", busy: true, mode: "working", status: "正在处理…" });
+  const current = await hub.snapshot();
+  assert.equal(current.messages[0].text, "新消息");
+  assert.equal(current.stream.mode, "working");
+  assert.deepEqual(
+    events.map((event) => event.type),
+    ["messages", "stream"],
+  );
+
+  unsubscribe();
+  hub.setMessages([]);
+  assert.equal(events.length, 2);
+});
+
+test("brain runner streams a fake CLI turn and records session usage", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "zcode-duet-brain-"));
+  try {
+    const script = [
+      'console.log(JSON.stringify({ type: "session.resumed", sessionId: "sess_test" }));',
+      'console.log(JSON.stringify({ type: "part.delta", payload: { field: "text", delta: "你好" } }));',
+      'console.log(JSON.stringify({ type: "result", sessionId: "sess_test", response: "你好", projection: { contextUsed: 10, contextWindow: 100 } }));',
+    ].join("\n");
+    const sessionUpdates = [];
+    const activities = [];
+    const events = [];
+    let finish;
+    const finished = new Promise((resolve) => {
+      finish = resolve;
+    });
+
+    const runner = createBrainRunner({
+      repoRoot: directory,
+      getBrainConfig: () => ({ cliMode: "yolo", maxPromptChars: 100 }),
+      getModel: () => null,
+      resolveCommand: () => ({
+        command: process.execPath,
+        args: ["-e", script, "--"],
+        cwd: directory,
+      }),
+      supervisor: {
+        lease: async () => {},
+        release: async () => {},
+        preview: async () => ({ changes: [], dirty: false }),
+      },
+      messages: { read: async () => [] },
+      sessions: {
+        read: async () => ({ sessionId: null, contextUsed: null, contextWindow: null }),
+        update: async (patch) => sessionUpdates.push(patch),
+      },
+      activityConsole: { append: (line) => activities.push(line) },
+      emit: (type, payload) => {
+        events.push({ type, payload });
+        if (type === "task-complete") finish();
+      },
+      warn: () => {},
+    });
+
+    const result = await runner.send("你好");
+    assert.equal(result.ok, true);
+    await Promise.race([
+      finished,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("brain timeout")), 5000)),
+    ]);
+    runner.dispose();
+
+    assert.ok(events.some((event) => event.type === "brain-start"));
+    assert.ok(
+      events.some(
+        (event) =>
+          event.type === "brain-event" &&
+          event.payload.kind === "assistant-delta" &&
+          event.payload.text === "你好",
+      ),
+    );
+    assert.ok(
+      events.some((event) => event.type === "task-complete" && event.payload.noChanges === true),
+    );
+    assert.ok(
+      sessionUpdates.some(
+        (patch) =>
+          patch.sessionId === "sess_test" &&
+          patch.contextUsed === 10 &&
+          patch.contextWindow === 100,
+      ),
+    );
+    assert.ok(activities.includes("—— 新一轮任务 ——"));
+    assert.ok(activities.includes("brain finished"));
   } finally {
     await rm(directory, { force: true, maxRetries: 10, recursive: true, retryDelay: 100 });
   }

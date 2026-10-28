@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self' file:; script-src 'self' file:; style-src 'self' file:; img-src 'self' data: file:; object-src 'none'; base-uri 'none'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="./reader.css" />
+    <title>与 K 的对话</title>
+  </head>
+  <body>
+    <header class="reader-header">
+      <div class="reader-heading">
+        <span class="reader-title">与 K 的对话</span>
+        <span class="reader-status">
+          <span class="status-dot" id="status-dot"></span>
+          <span id="status-text">连接中…</span>
+        </span>
+      </div>
+      <button id="focus-pet" type="button">回到精灵</button>
+    </header>
+
+    <main class="reader-messages-wrap">
+      <div class="reader-messages" id="messages" aria-live="polite"></div>
+      <button class="scroll-bottom" id="scroll-bottom" type="button" title="回到底部" hidden>
+        ↓
+      </button>
+    </main>
+
+    <footer class="reader-footer">只读视图 · 在精灵窗口里回复</footer>
+    <script type="module" src="./reader.js"></script>
+  </body>
+</html>

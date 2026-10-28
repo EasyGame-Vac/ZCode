@@ -1,0 +1,246 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f7f7fb;
+  --surface: #ffffff;
+  --border: rgba(22, 20, 34, 0.12);
+  --text: #1b1a24;
+  --muted: #6d6a80;
+  --user-bubble: rgba(109, 91, 255, 0.14);
+  --assistant-bubble: rgba(22, 20, 34, 0.055);
+  --accent: #6d5bff;
+  --success: #2ba471;
+  --warning: #b7791f;
+  --danger: #d6455d;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14141b;
+    --surface: #1b1b24;
+    --border: rgba(255, 255, 255, 0.11);
+    --text: #f2f1f8;
+    --muted: #9b98af;
+    --user-bubble: rgba(139, 124, 255, 0.24);
+    --assistant-bubble: rgba(255, 255, 255, 0.07);
+    --accent: #8b7cff;
+    --success: #4dd4a6;
+    --warning: #ffc857;
+    --danger: #ff6b81;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    ui-sans-serif,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    "PingFang SC",
+    "Microsoft YaHei",
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.reader-header {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.reader-heading {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.reader-title {
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.reader-status {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+#status-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+body[data-state="idle"] .status-dot,
+body[data-state="waiting"] .status-dot {
+  background: var(--success);
+}
+
+body[data-state="thinking"] .status-dot,
+body[data-state="working"] .status-dot,
+body[data-state="verifying"] .status-dot {
+  background: var(--warning);
+}
+
+body[data-state="error"] .status-dot {
+  background: var(--danger);
+}
+
+#focus-pet {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+#focus-pet:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.reader-messages-wrap {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  flex: 1;
+}
+
+.reader-messages {
+  display: flex;
+  width: 100%;
+  max-width: 760px;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0 auto;
+  padding: 20px 24px 28px;
+  overflow-y: auto;
+}
+
+.reader-messages::-webkit-scrollbar {
+  width: 8px;
+}
+
+.reader-messages::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--border);
+}
+
+.message {
+  max-width: 82%;
+  padding: 10px 14px;
+  border-radius: 14px;
+  font-size: 14px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+  user-select: text;
+  white-space: pre-wrap;
+}
+
+.message.user {
+  align-self: flex-end;
+  border-bottom-right-radius: 4px;
+  background: var(--user-bubble);
+}
+
+.message.assistant {
+  align-self: flex-start;
+  border-bottom-left-radius: 4px;
+  background: var(--assistant-bubble);
+}
+
+.message.assistant.streaming::after {
+  content: "▍";
+  color: var(--accent);
+  animation: caret 1s steps(1) infinite;
+}
+
+.reader-messages:empty::before {
+  color: var(--muted);
+  content: "还没有对话。回到精灵窗口开始聊天。";
+  font-size: 13px;
+}
+
+.scroll-bottom {
+  position: absolute;
+  right: 22px;
+  bottom: 16px;
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 15px;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
+}
+
+.scroll-bottom[hidden] {
+  display: none;
+}
+
+.scroll-bottom:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.reader-footer {
+  flex: none;
+  padding: 8px 20px 10px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 10.5px;
+  text-align: center;
+}
+
+@keyframes caret {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}

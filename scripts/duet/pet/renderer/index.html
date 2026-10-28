@@ -20,10 +20,18 @@
             <span class="status-dot" id="status-dot"></span>
             <span id="status-text">连接宿管中…</span>
           </div>
+          <button class="icon-button" id="chat-button" title="在独立窗口查看对话" type="button">
+            ⤢
+          </button>
           <button class="icon-button" id="hide-button" title="收起" type="button">—</button>
         </header>
 
-        <div class="messages" id="messages" aria-live="polite"></div>
+        <div class="messages-wrap">
+          <div class="messages" id="messages" aria-live="polite"></div>
+          <button class="scroll-bottom" id="scroll-bottom" title="回到底部" type="button" hidden>
+            ↓
+          </button>
+        </div>
 
         <section class="preview" id="preview" hidden>
           <button
