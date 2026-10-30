@@ -96,6 +96,8 @@ export class SessionDataLayer {
       openKind = entry.keepWarmTimer !== null ? "keep_warm" : "warm";
       entry.refCount++;
       entry.lastUsedAt = startedAt;
+      // 退出 keep-warm：先把后台累积帧同步应用，再交给 pane。
+      entry.store.setKeepWarm(false);
       if (entry.keepWarmTimer !== null) {
         clearTimeout(entry.keepWarmTimer);
         entry.keepWarmTimer = null;
@@ -166,6 +168,7 @@ export class SessionDataLayer {
       return;
     }
     // 关 pane ≠ 停 session：这里只是退订视图，session 在 CLI 里照跑。
+    entry.store.setKeepWarm(true);
     entry.keepWarmTimer = setTimeout(() => {
       this.entries.delete(topic);
       logger.lifecycle.info("v4 session data keep-warm expired", {

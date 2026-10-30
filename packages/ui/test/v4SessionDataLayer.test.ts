@@ -1524,6 +1524,54 @@ describe("SessionDataLayer", () => {
     expect(lease.store.getState().snapshot?.rows.window).toHaveLength(1);
   });
 
+  it("keep-warm 期间帧先入队，重新 acquire 时同步应用", async () => {
+    const lease = layer.acquire("s1");
+    await flushMicrotasks();
+    const store = lease.store;
+    expect(store.getState().snapshot?.seq).toBe(5);
+
+    lease.release();
+    transport.emit(
+      makeFrame("sub-1", 5, 6, {
+        kind: "deltas",
+        deltas: [{ op: "row.appended", row: assistantRow(1, "queued") }],
+      }),
+    );
+    expect(store.getState().snapshot?.seq).toBe(5);
+    expect(store.getState().snapshot?.rows.window).toHaveLength(0);
+
+    const next = layer.acquire("s1");
+    expect(next.openKind).toBe("keep_warm");
+    expect(next.store).toBe(store);
+    expect(store.getState().snapshot?.seq).toBe(6);
+    expect(store.getState().snapshot?.rows.window).toHaveLength(1);
+  });
+
+  it("keep-warm 连续 delta 合并后一次推进到最后 seq", async () => {
+    const lease = layer.acquire("s1");
+    await flushMicrotasks();
+    const store = lease.store;
+    lease.release();
+
+    transport.emit(
+      makeFrame("sub-1", 5, 6, {
+        kind: "deltas",
+        deltas: [{ op: "row.appended", row: assistantRow(1, "first") }],
+      }),
+    );
+    transport.emit(
+      makeFrame("sub-1", 6, 7, {
+        kind: "deltas",
+        deltas: [{ op: "row.appended", row: assistantRow(2, "second") }],
+      }),
+    );
+    expect(store.getState().snapshot?.seq).toBe(5);
+
+    layer.acquire("s1");
+    expect(store.getState().snapshot?.seq).toBe(7);
+    expect(store.getState().snapshot?.rows.window).toHaveLength(2);
+  });
+
   it("所有 UI store 的通知在下一帧合帧，且状态读取保持同步", async () => {
     const lease = layer.acquire("s1");
     await flushMicrotasks();
@@ -1898,6 +1946,39 @@ describe("ConversationProjectionStore.loadOlder", () => {
     const ids = state.snapshot!.rows.window.map((row) => row.rowId);
     expect(ids).toEqual([...ids].sort((a, b) => a - b));
     expect(hasOlderRows(state.snapshot)).toBe(false);
+  });
+
+  it("queryRowsPage 只读分页，不改变 live snapshot", async () => {
+    transport.rowsRangeImpl = (params) => {
+      expect(params).toEqual({ sessionId: "s1", beforeRowId: 41, limit: 60 });
+      return {
+        rows: olderRows(21, 40),
+        atSeq: 5,
+        atRevision: 5,
+        atLogEpoch: "epoch-1",
+        hasMore: true,
+      };
+    };
+    const before = store.getState().snapshot;
+
+    const result = await store.queryRowsPage({ beforeRowId: 41, limit: 60 });
+
+    expect(result.rows).toHaveLength(20);
+    expect(result.hasMore).toBe(true);
+    expect(store.getState().snapshot).toBe(before);
+  });
+
+  it("queryRowsPage 遇到 logEpoch 变化时拒绝拼页", async () => {
+    transport.rowsRangeImpl = () => ({
+      rows: [],
+      atSeq: 5,
+      atRevision: 5,
+      atLogEpoch: "epoch-2",
+      hasMore: false,
+    });
+
+    await expect(store.queryRowsPage({ beforeRowId: 41 })).rejects.toThrow("epoch changed");
+    expect(transport.rowsRangeCalls).toEqual([{ sessionId: "s1", beforeRowId: 41, limit: 60 }]);
   });
 
   it("TN07：完整目录按协议上限分页，全部成功后只提交一次 projection", async () => {

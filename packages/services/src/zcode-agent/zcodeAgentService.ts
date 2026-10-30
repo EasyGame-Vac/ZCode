@@ -1377,9 +1377,15 @@ export function createZCodeAgentService(
     }
     waitingWorkspaceStartups.clear();
   }
+  const ACCOUNT_CONFIG_REGISTRY_REFRESH_ONCE_REASONS = new Set([
+    "conversation_subscribe",
+    "session_create",
+  ]);
   const accountConfigSyncByClient = new WeakMap<ZCodeProtocolClient, Promise<void>>();
   // 此缓存只去重已交付的账号快照，不表示 Worker 的 Registry 已应用该版本。
   const accountConfigReceivedRevisionByClient = new WeakMap<ZCodeProtocolClient, string>();
+  // Account Config 交付后，Registry refresh 是昂贵的全量重建；同一 client 同一 revision 只做一次。
+  const accountConfigRegistryRefreshedRevisionByClient = new WeakMap<ZCodeProtocolClient, string>();
   const sessionTraceIdBySessionKey = new Map<string, TraceId>();
   const accountRequestAuthService = options?.accountRequestAuthService;
   const accountProviderConfigSource = options?.accountProviderConfigSource;
@@ -1607,12 +1613,18 @@ export function createZCodeAgentService(
             status: result.status,
           });
         }
-        if (params.refreshRegistry) {
+        const canReuseRegistryRefresh =
+          ACCOUNT_CONFIG_REGISTRY_REFRESH_ONCE_REASONS.has(params.reason) &&
+          accountConfigRegistryRefreshedRevisionByClient.get(params.client) === snapshot.revision;
+        // v4_command（模型切换等）必须每次刷新；只有订阅/建会话的 Account Config 屏障可以复用。
+        if (params.refreshRegistry && !canReuseRegistryRefresh) {
           await params.client.request(
             zcodeProtocolMethods.providerRefreshRegistry,
             { reason: params.reason },
             zcodeProviderRefreshRegistryResultSchema,
           );
+          // 只有 refresh 成功才记版本；失败时下一次 subscribe 仍会重试。
+          accountConfigRegistryRefreshedRevisionByClient.set(params.client, snapshot.revision);
         }
       });
     accountConfigSyncByClient.set(params.client, current);
@@ -6124,6 +6136,17 @@ export function createZCodeAgentService(
         taskMetaReadMs,
         cliRequestMs,
       };
+      // 本地低频诊断：把原本只进 ARMS 的 openTiming 落一份日志，便于和 renderer 的
+      // perf.session_switch 对齐，拆开冷恢复的 host/CLI/hydration 各阶段。
+      logger.info(undefined, "V4 会话订阅 open timing", {
+        event: "perf.session_open_timing",
+        sessionId: params.sessionId,
+        topic,
+        historyFirst,
+        hasBase: Boolean(params.base),
+        subscribeTotalMs: hostPrepareMs + cliRequestMs,
+        ...openTiming,
+      });
       rememberV4SubscriptionRoute(
         params,
         topic,

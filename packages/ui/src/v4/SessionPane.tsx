@@ -303,7 +303,10 @@ import {
 } from "@/v4/slashCommands.js";
 import { useSlashCommands } from "@/hooks/useSlashCommands.js";
 import { useV4Conversation } from "@/v4/V4ConversationContext.js";
-import { useConversationProjection } from "@/v4/useConversationProjection.js";
+import {
+  useConversationProjection,
+  useSessionSwitchTrace,
+} from "@/v4/useConversationProjection.js";
 import { ConversationHistoryDrawer } from "@/v4/ConversationHistoryDrawer.js";
 import { DEFAULT_LIVE_TURN_LIMIT } from "@/v4/conversationLiveRetention.js";
 import { usePendingCommandRecovery } from "@/v4/usePendingCommandRecovery.js";
@@ -761,6 +764,7 @@ export function SessionPane({
     [lease],
   );
   const snapshot = state.snapshot;
+  useSessionSwitchTrace(lease, snapshot, state.hiddenTurnCount);
   const runtimeReady =
     sessionId === null ||
     (snapshot?.sessionId === sessionId &&
@@ -4676,6 +4680,16 @@ export function SessionPane({
     return lease?.store.loadOlder();
   }, [lease]);
 
+  // 历史抽屉只读分页：不改 live snapshot，也不与主时间线共享加载状态。
+  const loadHistoryRows = useCallback(
+    async (beforeRowId: number, limit: number) => {
+      if (!lease) throw new Error("会话尚未就绪");
+      const result = await lease.store.queryRowsPage({ beforeRowId, limit });
+      return { rows: result.rows, hasMore: result.hasMore };
+    },
+    [lease],
+  );
+
   const handleLoadAllOlder = useCallback(() => {
     return lease
       ? lease.store.loadAllOlder()
@@ -6039,6 +6053,9 @@ export function SessionPane({
                   workspacePath={workspacePath}
                   {...(workspaceIdentity ? { workspaceIdentity } : {})}
                   {...(remoteSessionId ? { remoteSessionId } : {})}
+                  initialRows={timelineSnapshot?.rows.window ?? []}
+                  initialHasMore={timelineSnapshot ? hasOlderRows(timelineSnapshot) : false}
+                  loadOlderRows={loadHistoryRows}
                   onClose={() => setHistoryDrawerOpen(false)}
                 />
               </BotGroupDeliveryProvider>

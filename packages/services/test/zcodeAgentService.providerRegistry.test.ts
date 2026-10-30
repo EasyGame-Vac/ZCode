@@ -912,6 +912,93 @@ describe("createZCodeAgentService provider registry", () => {
     service.disposeAll();
   });
 
+  it("同一 client/account revision 只重建一次 provider registry", async () => {
+    const calls: string[] = [];
+    const request = vi.fn(async (method: string) => {
+      calls.push(method);
+      if (method === zcodeProtocolMethods.providerUpdateAccountConfig) {
+        return {
+          receivedRevision: "account-1",
+          status: "received" as const,
+          providerCount: 1,
+        };
+      }
+      if (method === zcodeProtocolMethods.providerRefreshRegistry) {
+        return { refreshed: true as const };
+      }
+      if (method === zcodeProtocolMethods.sessionCreate) {
+        return createSessionSnapshot({
+          model: { providerId: "e2e-primary", modelId: "deepseek-v4-flash" },
+        });
+      }
+      throw new Error(`Unexpected method ${method}`);
+    });
+    const client = {
+      request,
+      transportKind: "stdio" as const,
+      onNotification: () => ({ dispose() {} }),
+      onRequest: () => ({ dispose() {} }),
+      onClose: () => ({ dispose() {} }),
+    };
+    vi.resetModules();
+    vi.doMock("../src/zcode-agent/zcodeAgentProcessManager.js", () => ({
+      ZCodeAgentProcessManager: class extends MockProcessManagerBase {
+        async getClient() {
+          return client;
+        }
+        disposeAll() {}
+      },
+    }));
+    const { createZCodeAgentService } = await import("../src/zcode-agent/zcodeAgentService.js");
+    const accountSnapshot: AccountProviderConfigSnapshot = {
+      revision: "account-1",
+      basedOnZCodeBuiltinRevision: "zcode-builtin:1",
+      states: {
+        "account:zai-individual-coding-plan": {
+          availability: "available",
+          entitled: true,
+          current: false,
+        },
+      },
+      providers: new ProviderConfigMap([
+        [
+          "account:zai-individual-coding-plan",
+          new ProviderConfig({
+            access: new ZhipuAccountAccessConfig({ entitled: true }),
+            builtinModelIds: ["GLM-5.2"],
+          }),
+        ],
+      ]),
+    };
+    const service = createZCodeAgentService({
+      modelSelectionReadinessSource: createReadyModelSelectionSource(),
+      accountProviderConfigSource: {
+        async read() {
+          return accountSnapshot;
+        },
+        onDidChange() {
+          return () => {};
+        },
+      },
+    });
+    const target = {
+      workspacePath: "/workspace/app",
+      workspaceIdentity: "remote:ssh:dev:/workspace/app",
+      model: { providerId: "e2e-primary", modelId: "deepseek-v4-flash" },
+    };
+
+    await service.createSession(target);
+    await service.createSession(target);
+
+    expect(
+      calls.filter((method) => method === zcodeProtocolMethods.providerRefreshRegistry),
+    ).toHaveLength(1);
+    expect(
+      calls.filter((method) => method === zcodeProtocolMethods.providerUpdateAccountConfig),
+    ).toHaveLength(1);
+    service.disposeAll();
+  });
+
   it("pushes changed Account Config without rebuilding the Workspace Snapshot", async () => {
     const accountSource = createAccountProviderConfigChangeSource({
       revision: "account-1",

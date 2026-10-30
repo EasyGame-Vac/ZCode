@@ -19,6 +19,7 @@ import {
   type SessionModelTransition,
   type ToolCallRow,
   type TopicFrameDeliveryKind,
+  type V4ConversationRowsRangeResult,
 } from "@zcode/shared/zcode-protocol-v4";
 import { logger } from "@/logger.js";
 import type { ConversationTurnNavigatorHydrationResult } from "@/v4/conversationTurnNavigatorHelpers.js";
@@ -37,6 +38,14 @@ import { uiMemoryDiagnosticsRegistry } from "@/lib/memoryDiagnostics.js";
  * 所以这里按 sessionsIndexStore 的既定模式做有界退避。
  */
 const RUNTIME_RECYCLE_RETRY_DELAYS_MS = [250, 1_000, 3_000] as const;
+// keep-warm 后台帧：合并连续 delta，最多每秒 apply 一次；队列上限防止长时间无消费者时无限增长。
+const BACKGROUND_APPLY_INTERVAL_MS = 1_000;
+const MAX_BACKGROUND_FRAMES = 120;
+
+interface BackgroundFrameEntry {
+  frame: ConversationTopicFrame;
+  delivery?: { deliveryKind: TopicFrameDeliveryKind };
+}
 
 /**
  * accepted ACK 后等待权威输入投影的宽限期。
@@ -379,6 +388,14 @@ export class ConversationProjectionStore {
   private notifyScheduled = false;
   private notifyFrame: number | null = null;
   private notifyTimer: ReturnType<typeof setTimeout> | null = null;
+  // 卡顿追踪限频：同一 store 每 2s 最多报一条慢通知/慢 apply，避免日志风暴。
+  private lastSlowNotifyLogAt = 0;
+  private lastSlowApplyLogAt = 0;
+  // keep-warm 后台帧：SessionDataLayer 在 refCount 归零时切换；没有消费者时延迟 apply。
+  private keepWarm = false;
+  private processingBackgroundFrames = false;
+  private backgroundFrames: BackgroundFrameEntry[] = [];
+  private backgroundFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     readonly topic: string,
@@ -478,6 +495,7 @@ export class ConversationProjectionStore {
   }
 
   subscribe(listener: () => void): () => void {
+    this.flushBackgroundFrames();
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
@@ -487,13 +505,110 @@ export class ConversationProjectionStore {
    * 常规行状态仍以 subscribe + getState 为准。
    */
   onLiveDeltas(listener: (deltas: readonly ConversationDelta[]) => void): () => void {
+    this.flushBackgroundFrames();
     this.liveDeltaListeners.add(listener);
     return () => this.liveDeltaListeners.delete(listener);
   }
 
   onOnlineModelTransition(listener: (transition: SessionModelTransition) => void): () => void {
+    this.flushBackgroundFrames();
     this.modelTransitionListeners.add(listener);
     return () => this.modelTransitionListeners.delete(listener);
+  }
+
+  /**
+   * SessionDataLayer 的唯一切换点：refCount 归零后进入 keep-warm，重新 acquire 时退出。
+   * 退出时同步应用排队的帧，保证调用方拿到的 getState 是最新状态。
+   */
+  setKeepWarm(enabled: boolean): void {
+    if (this.keepWarm === enabled) return;
+    this.keepWarm = enabled;
+    if (!enabled) this.flushBackgroundFrames();
+  }
+
+  /** 同步应用 keep-warm 期间累积的帧；acquire/subscribe/close 路径使用。 */
+  flushBackgroundFrames(): void {
+    this.clearBackgroundFlushTimer();
+    this.drainBackgroundFrames();
+  }
+
+  private enqueueBackgroundFrame(
+    frame: ConversationTopicFrame,
+    delivery?: { deliveryKind: TopicFrameDeliveryKind },
+  ): void {
+    this.backgroundFrames.push({ frame, delivery });
+    if (this.backgroundFrames.length >= MAX_BACKGROUND_FRAMES) {
+      this.flushBackgroundFrames();
+      return;
+    }
+    if (this.backgroundFlushTimer !== null) return;
+    this.backgroundFlushTimer = setTimeout(() => {
+      this.backgroundFlushTimer = null;
+      this.drainBackgroundFrames();
+    }, BACKGROUND_APPLY_INTERVAL_MS);
+  }
+
+  private clearBackgroundFlushTimer(): void {
+    if (this.backgroundFlushTimer === null) return;
+    clearTimeout(this.backgroundFlushTimer);
+    this.backgroundFlushTimer = null;
+  }
+
+  private drainBackgroundFrames(): void {
+    if (this.closed || this.processingBackgroundFrames || this.backgroundFrames.length === 0) {
+      return;
+    }
+    const queued = this.backgroundFrames;
+    this.backgroundFrames = [];
+    this.processingBackgroundFrames = true;
+    try {
+      let pending: BackgroundFrameEntry | null = null;
+      const flushPending = () => {
+        if (!pending) return;
+        const entry = pending;
+        pending = null;
+        this.handleFrame(entry.frame, entry.delivery);
+      };
+      for (const entry of queued) {
+        const payload = entry.frame.payload;
+        const deliveryKind = entry.delivery?.deliveryKind ?? "online";
+        if (payload.kind !== "deltas" || deliveryKind !== "online") {
+          flushPending();
+          this.handleFrame(entry.frame, entry.delivery);
+          continue;
+        }
+        if (!pending) {
+          pending = entry;
+          continue;
+        }
+        const basePending = pending as BackgroundFrameEntry;
+        const previousPayload = basePending.frame.payload;
+        if (
+          previousPayload.kind === "deltas" &&
+          basePending.frame.subscriptionId === entry.frame.subscriptionId &&
+          basePending.frame.toSeq === entry.frame.fromSeq
+        ) {
+          pending = {
+            frame: {
+              ...basePending.frame,
+              toSeq: entry.frame.toSeq,
+              sentAt: entry.frame.sentAt,
+              payload: {
+                kind: "deltas",
+                deltas: [...previousPayload.deltas, ...payload.deltas],
+              },
+            },
+            delivery: basePending.delivery,
+          };
+        } else {
+          flushPending();
+          pending = entry;
+        }
+      }
+      flushPending();
+    } finally {
+      this.processingBackgroundFrames = false;
+    }
   }
 
   private setState(patch: Partial<ConversationStoreState>): void {
@@ -512,7 +627,22 @@ export class ConversationProjectionStore {
   }
 
   private emitStateChange(): void {
+    if (this.listeners.size === 0) return;
+    const startedAt = monotonicNow();
     for (const listener of this.listeners) listener();
+    const durationMs = monotonicNow() - startedAt;
+    if (durationMs < 32) return;
+    const now = monotonicNow();
+    if (now - this.lastSlowNotifyLogAt < 2_000) return;
+    this.lastSlowNotifyLogAt = now;
+    logger.info("conversation notify slow", {
+      event: "perf.conversation_notify_slow",
+      module: "ui.v4.conversation_projection_store",
+      topic: this.topic,
+      listeners: this.listeners.size,
+      rows: this.countProjectionRows(),
+      durationMs: Math.round(durationMs),
+    });
   }
 
   private scheduleNotify(): void {
@@ -770,6 +900,16 @@ export class ConversationProjectionStore {
     delivery?: { deliveryKind: TopicFrameDeliveryKind },
   ): void {
     if (this.closed) return;
+    if (
+      this.keepWarm &&
+      !this.processingBackgroundFrames &&
+      this.listeners.size === 0 &&
+      this.liveDeltaListeners.size === 0 &&
+      this.modelTransitionListeners.size === 0
+    ) {
+      this.enqueueBackgroundFrame(frame, delivery);
+      return;
+    }
     // 代际防护：旧订阅的迟到帧直接丢弃。
     if (frame.subscriptionId !== this.state.subscriptionId) return;
     const awaitingInitial =
@@ -900,7 +1040,23 @@ export class ConversationProjectionStore {
       void this.connect({ forceSnapshot: true });
       return;
     }
+    const applyStartedAt = monotonicNow();
     const applied = applyConversationDeltas(current, frame.payload.deltas);
+    const applyDurationMs = monotonicNow() - applyStartedAt;
+    if (applyDurationMs >= 8) {
+      const now = monotonicNow();
+      if (now - this.lastSlowApplyLogAt >= 2_000) {
+        this.lastSlowApplyLogAt = now;
+        logger.info("conversation apply slow", {
+          event: "perf.conversation_apply_slow",
+          module: "ui.v4.conversation_projection_store",
+          topic: this.topic,
+          deltas: frame.payload.deltas.length,
+          windowRows: current.rows.window.length,
+          durationMs: Math.round(applyDurationMs),
+        });
+      }
+    }
     // seq 是快照对齐水位（R-03），delta 帧应用完推进到帧右端点。
     const sharedNext = this.shareDeltaRows({ ...applied, seq: frame.toSeq }, frame.payload.deltas);
     const retention =
@@ -1213,6 +1369,44 @@ export class ConversationProjectionStore {
     // logEpoch/seq 裁决 resume 或 snapshot；真实 runtime restart 仍保持 full subscribe。
     if (reason === "transportReplaced") void this.connect();
     else void this.connect({ forceSnapshot: true });
+  }
+
+  /**
+   * 只读历史分页：按 rowId 向 Host 请求一页更早的行，不修改 live snapshot。
+   * 供历史抽屉使用；纪元不一致时抛错，避免跨 CLI 重启拼页。
+   */
+  async queryRowsPage(params: {
+    beforeRowId: number;
+    limit?: number;
+  }): Promise<V4ConversationRowsRangeResult> {
+    if (this.closed) throw new Error("conversation store 已释放");
+    const snapshot = this.state.snapshot;
+    const sessionId = parseConversationTopic(this.topic);
+    if (!snapshot || !sessionId) throw new Error("conversation store 尚未就绪");
+    const limit = params.limit ?? PROTOCOL_V4_LIMITS.snapshotTailWindowRows;
+    const startedAt = monotonicNow();
+    const result = await this.transport.rowsRange({
+      sessionId,
+      beforeRowId: params.beforeRowId,
+      limit,
+    });
+    const durationMs = monotonicNow() - startedAt;
+    if (durationMs >= 100) {
+      logger.info("history rows slow", {
+        event: "perf.history_rows_slow",
+        module: "ui.v4.conversation_projection_store",
+        topic: this.topic,
+        beforeRowId: params.beforeRowId,
+        limit,
+        rows: result.rows.length,
+        durationMs: Math.round(durationMs),
+      });
+    }
+    if (this.closed) throw new Error("conversation store 已释放");
+    if (result.atLogEpoch !== snapshot.logEpoch) {
+      throw new Error("conversation history epoch changed");
+    }
+    return result;
   }
 
   /**
@@ -1587,6 +1781,9 @@ export class ConversationProjectionStore {
     // close 的终态必须同步送达；取消未触发的合帧，避免 pane 卸载后仍收到一次通知。
     this.notifyCoalescing = false;
     this.cancelScheduledNotify();
+    this.clearBackgroundFlushTimer();
+    this.backgroundFrames = [];
+    this.keepWarm = false;
     this.offAssemblyFault();
     this.offRuntimeRestart?.();
     this.offRuntimeLifecycle?.();

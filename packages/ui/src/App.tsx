@@ -86,7 +86,10 @@ import { useWorkbenchGroupStore } from "@/v4/workbenchGroupStore.js";
 import type { SavedWorkflowHubTarget } from "@/v4/savedWorkflowHubContext.js";
 import type { SavedWorkflowsOpenTarget } from "@/settings/saved-workflows/SavedWorkflowsSection.js";
 import type { AssistantPreviewCardsAutoOpenRequest } from "@/lib/assistantPreviewCards.js";
-import { startMemoryDiagnosticsLogger } from "@/lib/memoryDiagnostics.js";
+import {
+  startMemoryDiagnosticsLogger,
+  startRendererLagDiagnostics,
+} from "@/lib/memoryDiagnostics.js";
 
 const EMPTY_REMOTE_WORKSPACE_RECOVERY_BY_WORKSPACE_KEY: NonNullable<
   AppProps["remoteWorkspaceRecoveryByWorkspaceKey"]
@@ -154,7 +157,11 @@ export function App({
     const memoryDiagnosticsLogger = startMemoryDiagnosticsLogger({
       reportHeapSample: reportRendererHeapSample,
     });
-    return () => memoryDiagnosticsLogger.stop();
+    const lagDiagnostics = startRendererLagDiagnostics();
+    return () => {
+      memoryDiagnosticsLogger.stop();
+      lagDiagnostics.stop();
+    };
   }, [reportRendererHeapSample]);
   const activeWorkspaceRpcTarget = useTabStore(
     useShallow((state) => {
