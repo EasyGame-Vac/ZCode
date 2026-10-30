@@ -282,6 +282,11 @@ export interface ConversationTimelineProps {
   sessionKey: string;
   /** renderer-local 滚动记忆 key；draft 为 null，不参与保存或恢复。 */
   scrollMemoryKey?: string | null;
+  /**
+   * 主会话切换会话时总是定位当前底部，不读取 renderer-local 滚动记忆。
+   * 默认 false，保留 Timeline 独立使用/回归测试的旧恢复契约。
+   */
+  alwaysScrollToBottomOnSessionSwitch?: boolean;
   /** 行渲染上下文（theme/codePreviewSettings/workspacePath）；宿主保证引用稳定。 */
   rowContext: ConversationRowRenderContext;
   onFork?: (target: ConversationRowTarget) => void;
@@ -390,6 +395,7 @@ function ConversationTimelineImpl({
   totalCount,
   sessionKey,
   scrollMemoryKey = null,
+  alwaysScrollToBottomOnSessionSwitch = false,
   rowContext,
   onFork,
   onRetry,
@@ -1544,12 +1550,7 @@ function ConversationTimelineImpl({
       });
       loadOlder.onLoadOlder?.();
     }
-  }, [
-    commitFollowing,
-    getActiveUserScrollIntent,
-    scheduleScrollDerivedSync,
-    virtualizer,
-  ]);
+  }, [commitFollowing, getActiveUserScrollIntent, scheduleScrollDerivedSync, virtualizer]);
 
   const handleBackToBottom = useCallback(() => {
     pendingDetachedScrollRestoreRef.current = null;
@@ -1739,6 +1740,29 @@ function ConversationTimelineImpl({
     virtualizer.measure();
     userAdjustedScrollSinceRestoreRef.current = false;
 
+    if (alwaysScrollToBottomOnSessionSwitch) {
+      // 主会话切换会话不恢复历史位置：直接贴当前底部并保持 bottom-lock。
+      pendingDetachedScrollRestoreRef.current = null;
+      commitFollowing(true);
+      scrollToBottom();
+      let releaseGuardFrame: number | null = null;
+      const correctionFrame = window.requestAnimationFrame(() => {
+        if (!userAdjustedScrollSinceRestoreRef.current) {
+          scrollToBottom();
+        }
+        releaseGuardFrame = window.requestAnimationFrame(() => {
+          suppressVirtualizerAdjustmentDuringRestoreRef.current = false;
+        });
+      });
+      return () => {
+        window.cancelAnimationFrame(correctionFrame);
+        if (releaseGuardFrame !== null) {
+          window.cancelAnimationFrame(releaseGuardFrame);
+        }
+        suppressVirtualizerAdjustmentDuringRestoreRef.current = false;
+      };
+    }
+
     const restoredState = readChatSessionScrollMemoryState(scrollMemoryKey);
     const pendingRestoreWait = resolvePendingScrollMemoryRestoreWait(
       restoredState,
@@ -1783,7 +1807,9 @@ function ConversationTimelineImpl({
       suppressVirtualizerAdjustmentDuringRestoreRef.current = false;
     };
   }, [
+    alwaysScrollToBottomOnSessionSwitch,
     clearUserScrollIntent,
+    commitFollowing,
     restoreScrollMemory,
     scrollMemoryKey,
     scrollToBottom,

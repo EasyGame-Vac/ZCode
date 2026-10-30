@@ -426,3 +426,46 @@ describe("会话切换滚动恢复（ZCT 复现）", () => {
     expect(timeline.scrollTop).toBe(12000);
   });
 });
+
+describe("主会话切换会话总是贴底", () => {
+  it("忽略保存的阅读位置，直接定位当前底部并保持 following", () => {
+    saveChatSessionScrollMemoryState(KEY_B, {
+      scrollTop: 5000,
+      scrollHeight: 20000,
+      clientHeight: 300,
+      wasPinnedToBottom: false,
+      updatedAt: 1,
+    });
+    layout.scrollHeight = 2400;
+
+    const container = installMinimalDom();
+    mountedRoot = createRoot(container);
+    act(() => {
+      mountedRoot!.render(
+        createElement(
+          ZCodeIntlProvider,
+          { initialLocale: "zh-CN" },
+          createElement(ConversationTimeline, {
+            alwaysScrollToBottomOnSessionSwitch: true,
+            rows: ROWS_B_TAIL,
+            totalCount: ROWS_B_TAIL.length,
+            sessionKey: "session-b",
+            scrollMemoryKey: KEY_B,
+            rowContext,
+          }),
+        ),
+      );
+    });
+
+    const timeline = findByTestId(container, TID_V4_TIMELINE)!;
+    act(() => {
+      flushAnimationFrame();
+      flushAnimationFrame();
+      flushScheduledMicrotasks();
+    });
+
+    expect(timeline.scrollTop).toBe(2100);
+    expect(timeline.getAttribute("data-following")).toBe("true");
+    expect(findByTestId(container, TID_V4_TIMELINE_BOTTOM)).toBeNull();
+  });
+});

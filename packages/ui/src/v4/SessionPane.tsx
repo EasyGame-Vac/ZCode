@@ -5948,6 +5948,7 @@ export function SessionPane({
                   totalCount={timelineSnapshot?.rows.totalCount ?? 0}
                   sessionKey={sessionId ?? "draft"}
                   scrollMemoryKey={timelineScrollMemoryKey}
+                  alwaysScrollToBottomOnSessionSwitch
                   rowContext={rowContext}
                   onFork={forkActionsEnabled ? handleFork : undefined}
                   onRetry={retryActionsEnabled ? handleRetry : undefined}
