@@ -34,6 +34,7 @@ import {
   ConversationProjectionStore,
   hasOlderRows,
   mergeOlderRows,
+  shouldDeferConversationNotify,
   shouldAutoLoadIncompleteLeadingTurn,
 } from "@/v4/conversationProjectionStore.js";
 import type { ConversationTransport } from "@/v4/transport.js";
@@ -2310,6 +2311,14 @@ describe("ConversationProjectionStore.loadOlder", () => {
     // 无可并入行 → null（引用不换）。
     expect(mergeOlderRows(window, olderRows(41, 45))).toBeNull();
     expect(mergeOlderRows(window, [])).toBeNull();
+  });
+
+  it("shouldDeferConversationNotify：首次不延迟，过密帧跳过，到达间隔即通知", () => {
+    expect(shouldDeferConversationNotify(100, 0, 48)).toBe(false);
+    expect(shouldDeferConversationNotify(120, 100, 48)).toBe(true);
+    expect(shouldDeferConversationNotify(147, 100, 48)).toBe(true);
+    expect(shouldDeferConversationNotify(148, 100, 48)).toBe(false);
+    expect(shouldDeferConversationNotify(148, 100, 0)).toBe(false);
   });
 });
 

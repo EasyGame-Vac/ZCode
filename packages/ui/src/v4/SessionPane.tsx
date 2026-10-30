@@ -473,6 +473,8 @@ const EMPTY_SUBAGENT_PROJECTION: NonNullable<ConversationSnapshot["subagents"]> 
 };
 
 const MAX_CONVERSATION_FILE_CHANGES_CACHE_ENTRIES = 20;
+// 主会话流式通知预算：publisher 约 30ms 一帧，Markdown 50–150ms 才提交；48ms 下限减少无意义的 React 提交。
+const LIVE_NOTIFY_MIN_INTERVAL_MS = 48;
 // 分享关闭时复用的空结果，避免每个流式帧都新建空数组并触发下游 memo 失效。
 const EMPTY_SHARE_RENDER_UNITS: ReturnType<typeof buildConversationTurnRenderUnits> = [];
 const EMPTY_SHARE_ITEMS: ReturnType<typeof buildConversationShareItems> = [];
@@ -756,6 +758,7 @@ export function SessionPane({
   // 通知合帧由 SessionDataLayer 对所有 UI store 统一开启。
   useEffect(() => {
     lease?.store.setLiveTurnLimit(DEFAULT_LIVE_TURN_LIMIT);
+    lease?.store.setNotificationMinIntervalMs(LIVE_NOTIFY_MIN_INTERVAL_MS);
   }, [lease]);
   const handleTimelineFollowingChange = useCallback(
     (following: boolean) => {

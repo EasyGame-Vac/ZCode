@@ -306,6 +306,15 @@ export function mergeOlderRows(
   return [...older, ...window];
 }
 
+/** active 会话通知预算：首次不延迟，之后至少间隔 minIntervalMs 才通知 React。 */
+export function shouldDeferConversationNotify(
+  now: number,
+  lastFlushAt: number,
+  minIntervalMs: number,
+): boolean {
+  return minIntervalMs > 0 && lastFlushAt > 0 && now - lastFlushAt < minIntervalMs;
+}
+
 /**
  * 外部 store（useSyncExternalStore 兼容：subscribe + getState 返回稳定引用）。
  * 生命周期由 SessionDataLayer 管（引用计数 + keep-warm），组件不直接 new。
@@ -388,6 +397,8 @@ export class ConversationProjectionStore {
   private notifyScheduled = false;
   private notifyFrame: number | null = null;
   private notifyTimer: ReturnType<typeof setTimeout> | null = null;
+  private notifyMinIntervalMs = 0;
+  private lastNotifyFlushAt = 0;
   // 卡顿追踪限频：同一 store 每 2s 最多报一条慢通知/慢 apply，避免日志风暴。
   private lastSlowNotifyLogAt = 0;
   private lastSlowApplyLogAt = 0;
@@ -626,6 +637,11 @@ export class ConversationProjectionStore {
     if (!enabled) this.flushScheduledNotify();
   }
 
+  /** active 会话通知预算；0 表示只按 rAF 合帧。 */
+  setNotificationMinIntervalMs(intervalMs: number): void {
+    this.notifyMinIntervalMs = Math.max(0, intervalMs);
+  }
+
   private emitStateChange(): void {
     if (this.listeners.size === 0) return;
     const startedAt = monotonicNow();
@@ -649,9 +665,22 @@ export class ConversationProjectionStore {
     if (this.notifyScheduled) return;
     this.notifyScheduled = true;
     const flush = () => {
-      this.notifyScheduled = false;
       this.notifyFrame = null;
       this.notifyTimer = null;
+      const now = monotonicNow();
+      if (shouldDeferConversationNotify(now, this.lastNotifyFlushAt, this.notifyMinIntervalMs)) {
+        if (typeof requestAnimationFrame === "function") {
+          this.notifyFrame = requestAnimationFrame(flush);
+        } else {
+          this.notifyTimer = setTimeout(
+            flush,
+            Math.max(1, Math.round(this.notifyMinIntervalMs - (now - this.lastNotifyFlushAt))),
+          );
+        }
+        return;
+      }
+      this.notifyScheduled = false;
+      this.lastNotifyFlushAt = now;
       this.emitStateChange();
     };
     if (typeof requestAnimationFrame === "function") {
