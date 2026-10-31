@@ -13,17 +13,19 @@ import {
 } from "@/components/ui/hover-card.js";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import {
-  buildConversationTurnNavigatorItems,
+  createConversationTurnNavigatorItemsSelector,
   resolveConversationTurnNavigatorActiveUnitIndex,
   resolveConversationTurnNavigatorBarVisualState,
   resolveConversationTurnNavigatorVisibleRange,
   resolveConversationTurnNavigatorVisualFocusItemIndex,
   type ConversationTurnNavigatorVirtualItem,
 } from "@/v4/conversationTurnNavigatorHelpers.js";
-import type { ConversationTurnRenderUnit } from "@/v4/conversationTurnRenderUnits.js";
+import type { ConversationTurnRenderUnitsPartition } from "@/v4/conversationTurnRenderUnits.js";
 
 export interface ConversationTurnNavigatorProps {
-  renderUnits: readonly ConversationTurnRenderUnit[];
+  /** 目录激活标志（宽屏 + 有可导航 query）；关闭时不渲染任何横条。 */
+  enabled?: boolean;
+  renderUnits: ConversationTurnRenderUnitsPartition;
   scrollOffsetPx: number;
   viewportHeightPx: number;
   virtualItems: readonly ConversationTurnNavigatorVirtualItem[];
@@ -53,6 +55,7 @@ function usePrefersReducedMotion() {
 }
 
 function ConversationTurnNavigatorImpl({
+  enabled = true,
   renderUnits,
   scrollOffsetPx,
   viewportHeightPx,
@@ -66,9 +69,10 @@ function ConversationTurnNavigatorImpl({
   const [interactionItemIndex, setInteractionItemIndex] = useState<number | undefined>(
     undefined,
   );
+  const selectItems = useMemo(() => createConversationTurnNavigatorItemsSelector(), []);
   const items = useMemo(
     () =>
-      buildConversationTurnNavigatorItems(renderUnits, {
+      selectItems(renderUnits, {
         assistantEmptyPreview: intl.formatMessage({
           id: "chat.turnNavigator.emptyAssistant",
         }),
@@ -79,7 +83,7 @@ function ConversationTurnNavigatorImpl({
           id: "chat.turnNavigator.userFallback",
         }),
       }),
-    [intl, renderUnits],
+    [intl, renderUnits, selectItems],
   );
 
   const activeUnitIndex = useMemo(
@@ -134,7 +138,7 @@ function ConversationTurnNavigatorImpl({
     setInteractionItemIndex(undefined);
   }, [visibleRange.start]);
 
-  if (items.length < 2) {
+  if (!enabled || items.length < 2) {
     return null;
   }
 
