@@ -404,6 +404,24 @@ export function registerDeepLinkProtocol(
 ) {
   const scheme = "zcode";
 
+  // dev（未打包）不注册 zcode:// 协议：dev 启动会用 USERPROFILE/APPDATA 重定向数据目录，
+  // Electron 单实例锁的作用域随环境变量拆分，浏览器 OAuth 回调拉起的实例拿到的永远是自己
+  // 作用域的锁，会以完整实例运行并残留白屏窗口（2026-10-31 实测，见 specs/desktop-second-instance.md）。
+  // dev 登录不依赖协议回调：oauthService 的轮询通道即可完成（pollPendingOAuth）。
+  // 这里同时清理本 checkout 之前注册过的协议，避免外部 zcode:// 链接继续拉起 dev electron；
+  // 打包版/官方版下次启动会重新注册自己的处理器。
+  if (!app.isPackaged) {
+    const removed = app.removeAsDefaultProtocolClient(
+      scheme,
+      process.execPath,
+      process.platform === "win32" && process.argv.length >= 2
+        ? [resolve(process.argv[1]!), "--"]
+        : undefined,
+    );
+    logger.info("[deep-link] dev 不注册协议，已清理历史注册", { scheme, removed });
+    return;
+  }
+
   // 外部 URL 必须位于 -- 后；否则 Windows 引号拆分可把 URL 内容变成 Electron 启动参数。
   // Inspector 早于应用 JS 和单实例锁启动，不能依赖后续 handleDeepLink 校验拦截。
   if (process.defaultApp && process.argv.length >= 2) {

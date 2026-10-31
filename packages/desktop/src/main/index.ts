@@ -2183,6 +2183,13 @@ app.on("open-url", (event, url) => {
 const gotTheLock = app.requestSingleInstanceLock(createDeepLinkSingleInstanceData(process.argv));
 if (!gotTheLock) {
   app.quit();
+  // app.quit() 只发起异步退出流程，模块会继续执行到 whenReady 并创建主窗口；
+  // 在 closeToTrayOnWindows=true 的退出拦截下，OAuth 回调（zcode://oauth/callback）
+  // 拉起的第二实例会残留为永不退出的最大化白窗，且渲染层不会加载。
+  // 实测依据见 specs/desktop-second-instance.md 缺陷记录（2026-10-31）。
+  // requestSingleInstanceLock 返回 false 时附加数据已在锁握手内同步转交给持锁实例，
+  // 此处直接终止进程不会丢失 deep link 数据。
+  process.exit(0);
 }
 app.on("second-instance", (_event, argv, _workingDirectory, additionalData) => {
   if (
